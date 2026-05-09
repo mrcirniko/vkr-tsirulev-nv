@@ -1,0 +1,216 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    gpus: all
+    ports:
+      - "11435:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:?S3_ACCESS_KEY_ID is required}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY is required}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+
+  langgraph_dev:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    container_name: langgraph_dev
+    gpus: all
+    working_dir: /workspace
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      DATABASE_URL: ${DATABASE_URL}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
+      LLM_MODEL: ${LLM_MODEL}
+      LLM_NUM_CTX: ${LLM_NUM_CTX:-131072}
+      LLM_NUM_PREDICT: ${LLM_NUM_PREDICT:-8192}
+      REFERENCE_LLM_MODEL: ${REFERENCE_LLM_MODEL}
+      REFERENCE_LLM_BASE_URL: ${REFERENCE_LLM_BASE_URL}
+      EMBEDDING_BACKEND: ${EMBEDDING_BACKEND}
+      EMBED_MODEL: ${EMBED_MODEL}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE}
+      EMBEDDING_MAX_TOKENS: ${EMBEDDING_MAX_TOKENS}
+      EMBEDDING_TRUST_REMOTE_CODE: ${EMBEDDING_TRUST_REMOTE_CODE}
+      EMBEDDING_QUERY_INSTRUCTION: ${EMBEDDING_QUERY_INSTRUCTION}
+      PRELOAD_EMBEDDINGS_ON_STARTUP: ${PRELOAD_EMBEDDINGS_ON_STARTUP:-false}
+      QDRANT_URL: ${QDRANT_URL}
+      QDRANT_COLLECTION_GENERAL: ${QDRANT_COLLECTION_GENERAL}
+      QDRANT_COLLECTION_PRIMAL: ${QDRANT_COLLECTION_PRIMAL}
+      QDRANT_COLLECTION_SECONDARY: ${QDRANT_COLLECTION_SECONDARY}
+      QDRANT_COLLECTION_SPECIFIC: ${QDRANT_COLLECTION_SPECIFIC}
+      HF_HOME: /models/huggingface
+      SENTENCE_TRANSFORMERS_HOME: /models/huggingface
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-true}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-diploma-agent}
+      LANGGRAPH_API_URL: ${LANGGRAPH_API_URL:-http://langgraph_dev:2024}
+      LANGGRAPH_ASSISTANT_ID: ${LANGGRAPH_ASSISTANT_ID:-contract_agent}
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-3}
+      MAX_CLASSIFICATION_CLARIFICATIONS: ${MAX_CLASSIFICATION_CLARIFICATIONS:-5}
+      S3_ENABLED: ${S3_ENABLED:-false}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
+      S3_BUCKET: ${S3_BUCKET:-contracts}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minioadmin}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_PRESIGN_EXPIRES_SECONDS: ${S3_PRESIGN_EXPIRES_SECONDS:-3600}
+    depends_on:
+      - ollama
+      - qdrant
+      - postgres
+      - minio
+    command: ["langgraph", "dev", "--host", "0.0.0.0", "--port", "2024", "--no-reload", "--allow-blocking"]
+    ports:
+      - "2024:2024"
+    volumes:
+      - ./:/workspace
+      - huggingface_cache:/models/huggingface
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    container_name: app
+    gpus: all
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      DATABASE_URL: ${DATABASE_URL}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
+      LLM_MODEL: ${LLM_MODEL}
+      LLM_NUM_CTX: ${LLM_NUM_CTX:-131072}
+      LLM_NUM_PREDICT: ${LLM_NUM_PREDICT:-8192}
+      REFERENCE_LLM_MODEL: ${REFERENCE_LLM_MODEL}
+      REFERENCE_LLM_BASE_URL: ${REFERENCE_LLM_BASE_URL}
+      EMBEDDING_BACKEND: ${EMBEDDING_BACKEND}
+      EMBED_MODEL: ${EMBED_MODEL}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE}
+      EMBEDDING_MAX_TOKENS: ${EMBEDDING_MAX_TOKENS}
+      EMBEDDING_TRUST_REMOTE_CODE: ${EMBEDDING_TRUST_REMOTE_CODE}
+      EMBEDDING_QUERY_INSTRUCTION: ${EMBEDDING_QUERY_INSTRUCTION}
+      PRELOAD_EMBEDDINGS_ON_STARTUP: ${PRELOAD_EMBEDDINGS_ON_STARTUP:-false}
+      QDRANT_URL: ${QDRANT_URL}
+      QDRANT_COLLECTION_GENERAL: ${QDRANT_COLLECTION_GENERAL}
+      QDRANT_COLLECTION_PRIMAL: ${QDRANT_COLLECTION_PRIMAL}
+      QDRANT_COLLECTION_SECONDARY: ${QDRANT_COLLECTION_SECONDARY}
+      QDRANT_COLLECTION_SPECIFIC: ${QDRANT_COLLECTION_SPECIFIC}
+      HF_HOME: /models/huggingface
+      SENTENCE_TRANSFORMERS_HOME: /models/huggingface
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-true}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-diploma-agent}
+      LANGGRAPH_API_URL: ${LANGGRAPH_API_URL:-http://langgraph_dev:2024}
+      LANGGRAPH_ASSISTANT_ID: ${LANGGRAPH_ASSISTANT_ID:-contract_agent}
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-3}
+      MAX_CLASSIFICATION_CLARIFICATIONS: ${MAX_CLASSIFICATION_CLARIFICATIONS:-5}
+      S3_ENABLED: ${S3_ENABLED:-false}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
+      S3_BUCKET: ${S3_BUCKET:-contracts}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minioadmin}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_PRESIGN_EXPIRES_SECONDS: ${S3_PRESIGN_EXPIRES_SECONDS:-3600}
+      ENV: ${ENV:-dev}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-false}
+      SESSION_SAME_SITE: ${SESSION_SAME_SITE:-lax}
+      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-http://localhost:3000}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:3000/api/auth/google/callback}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@local}
+      OWNER_USERNAME: ${OWNER_USERNAME:-}
+      OWNER_PASSWORD: ${OWNER_PASSWORD:-}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      YANDEX_CLIENT_ID: ${YANDEX_CLIENT_ID:-}
+      YANDEX_CLIENT_SECRET: ${YANDEX_CLIENT_SECRET:-}
+      YANDEX_REDIRECT_URI: ${YANDEX_REDIRECT_URI:-http://localhost:3000/api/auth/yandex/callback}
+      ADMIN_NPA_BUCKET: ${ADMIN_NPA_BUCKET:-admin-npa}
+      ADMIN_NPA_MAX_UPLOAD_MB: ${ADMIN_NPA_MAX_UPLOAD_MB:-50}
+      YOOKASSA_SHOP_ID: ${YOOKASSA_SHOP_ID:-}
+      YOOKASSA_SECRET_KEY: ${YOOKASSA_SECRET_KEY:-}
+      YOOKASSA_TEST_MODE: ${YOOKASSA_TEST_MODE:-true}
+      YOOKASSA_RETURN_URL: ${YOOKASSA_RETURN_URL:-http://localhost:3000/billing/return}
+    depends_on:
+      - ollama
+      - qdrant
+      - postgres
+      - minio
+      - langgraph_dev
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - huggingface_cache:/models/huggingface
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: frontend
+    depends_on:
+      - app
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+  qdrant_data:
+  postgres_data:
+  huggingface_cache:
+  minio_data:

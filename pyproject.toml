@@ -1,0 +1,68 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = [
+    ".venv",
+    ".langgraph_api",
+    ".langgraph_api.bak.20260427_022637",
+    "tests_old",
+    "data",
+    "gguf",
+    "frontend",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "F",      # pyflakes
+    "I",      # isort
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "N",      # pep8-naming
+    "RET",    # flake8-return
+    "PTH",    # flake8-use-pathlib
+    "ASYNC",  # flake8-async
+    "S",      # flake8-bandit (security)
+    "RUF",    # ruff-specific
+]
+ignore = [
+    "E501",    # line length — handled by formatter
+    "B008",    # FastAPI Depends() in defaults is idiomatic
+    "S101",    # assert is fine outside prod hot paths
+    "RUF001",  # Cyrillic homoglyphs — this codebase is intentionally Russian
+    "RUF002",
+    "RUF003",
+    "S104",    # 0.0.0.0 bind is intentional inside containers
+    "S608",    # SQL injection FP — we use SQLAlchemy ORM
+    "UP042",   # StrEnum migration changes __str__ behavior; keep explicit (str, Enum)
+    "RUF022",  # __all__ ordering is intentional (grouped by concern, has UNUSED comments)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Migrations and seed scripts run at startup; tighter rules don't help.
+"app/db/migrate.py" = ["S"]
+# Settings dataclass uses os.getenv defaults — naming/uppercase rules misfire.
+"app/config.py" = ["N"]
+# Legacy CLI scripts predate the new pipeline; keep them out of strict mode.
+"scripts/*.py" = ["S", "B", "SIM"]
+# Tests use private attributes, broad excepts in fixtures, and assert.
+"tests/*.py" = ["S", "SLF001", "B017"]
+# Domain exceptions read better as QuotaExceeded / EditNotAllowed than the
+# *Error suffix would force.
+"app/billing/service.py" = ["N818"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agent", "admin", "auth", "billing", "cases", "db", "preferences", "rag"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["app"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+line-ending = "lf"

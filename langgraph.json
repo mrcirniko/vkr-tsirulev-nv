@@ -1,0 +1,9 @@
+{
+  "dependencies": [
+    "./app"
+  ],
+  "graphs": {
+    "contract_agent": "./app/agent/studio_graph.py:graph"
+  },
+  "env": ".env"
+}
