@@ -83,6 +83,13 @@ def _contract_heading(deal_type: str | None) -> str:
     if not suffix:
         suffix = "________________"
     return f"ДОГОВОР {suffix}"
+def _contract_heading(deal_type: str | None) -> str:
+    raw = (deal_type or "").strip()
+    lower = raw.lower()
+    if lower.startswith("договор"):
+        raw = raw[len("договор"):].strip()
+    suffix = raw.upper() if raw else "________________"
+    return f"ДОГОВОР {suffix}"
 
 
 def _build_header(document: Document, deal_type: str | None) -> None:
