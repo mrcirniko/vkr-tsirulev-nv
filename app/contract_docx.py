@@ -79,8 +79,7 @@ def contract_html_to_text(contract_html: str) -> str:
 
 def _contract_heading(deal_type: str | None) -> str:
     raw = (deal_type or "").strip()
-    lower = raw.lower()
-    if lower.startswith("договор"):
+    if raw.lower().startswith("договор"):
         raw = raw[len("договор"):].strip()
     suffix = raw.upper() if raw else "________________"
     return f"ДОГОВОР {suffix}"
