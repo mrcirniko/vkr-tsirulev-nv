@@ -14,11 +14,18 @@
 /* ---- Login: simple centered card ---- */
 
 .admin-login-page {
+  position: relative;
   min-height: 100vh;
   display: grid;
   place-items: center;
   background: var(--bg);
   padding: 24px;
+}
+
+.admin-login-page .theme-toggle {
+  position: absolute;
+  top: 16px;
+  right: 16px;
 }
 
 .admin-login-card {
@@ -930,6 +937,13 @@
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 12px;
+}
+
+.user-badge__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
 .user-badge__info {

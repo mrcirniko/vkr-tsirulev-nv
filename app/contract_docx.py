@@ -77,6 +77,7 @@ def contract_html_to_text(contract_html: str) -> str:
     parser.close()
     return parser.get_text()
 
+
 def _contract_heading(deal_type: str | None) -> str:
     raw = (deal_type or "").strip()
     if raw.lower().startswith("договор"):

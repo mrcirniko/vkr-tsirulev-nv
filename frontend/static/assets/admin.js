@@ -29,6 +29,7 @@ const SOURCE_GROUP_LABELS = {
 const state = {
   view: "loading", // 'loading' | 'login' | 'app'
   section: "upload",
+  theme: "dark",
   admin: null,
   loginUsername: "",
   loginPassword: "",
@@ -119,6 +120,16 @@ function setState(patch) {
   render();
 }
 
+function applyTheme() {
+  document.documentElement.dataset.theme = state.theme;
+}
+
+function toggleTheme() {
+  state.theme = state.theme === "dark" ? "light" : "dark";
+  applyTheme();
+  render();
+}
+
 const iconPaths = {
   Upload: '<path d="M12 3v12"></path><path d="m6 9 6-6 6 6"></path><path d="M5 21h14"></path>',
   List: '<line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line>',
@@ -133,6 +144,8 @@ const iconPaths = {
   Eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle>',
   X: '<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>',
   GripVertical: '<circle cx="9" cy="5" r="1"></circle><circle cx="9" cy="12" r="1"></circle><circle cx="9" cy="19" r="1"></circle><circle cx="15" cy="5" r="1"></circle><circle cx="15" cy="12" r="1"></circle><circle cx="15" cy="19" r="1"></circle>',
+  Moon: '<path d="M20.985 12.486a9 9 0 1 1-9.47-9.47c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.343-.215.825-.003.8.399Z"></path>',
+  Sun: '<circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="m4.93 4.93 1.41 1.41"></path><path d="m17.66 17.66 1.41 1.41"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="m6.34 17.66-1.41 1.41"></path><path d="m19.07 4.93-1.41 1.41"></path>',
 };
 
 function icon(name) {
@@ -452,6 +465,9 @@ async function submitLogin(event) {
 function renderLogin() {
   return `
     <div class="admin-login-page">
+      <button id="admin-theme-toggle" class="theme-toggle" type="button" aria-label="Переключить тему">
+        ${state.theme === "dark" ? icon("Moon") : icon("Sun")}
+      </button>
       <form id="admin-login-form" class="admin-login-card">
         <h1>Вход</h1>
         <label class="admin-field">
@@ -482,6 +498,7 @@ function bindLogin(root) {
   u?.addEventListener("input", (e) => { state.loginUsername = e.target.value; });
   p?.addEventListener("input", (e) => { state.loginPassword = e.target.value; });
   form?.addEventListener("submit", submitLogin);
+  root.querySelector("#admin-theme-toggle")?.addEventListener("click", toggleTheme);
 }
 
 // ---- Upload section ----
@@ -1390,7 +1407,12 @@ function renderShell() {
               <div class="user-badge__name">${escapeHtml(state.admin?.username || "")}</div>
               <div class="user-badge__email muted">${state.admin?.is_owner ? "владелец" : "администратор"}</div>
             </div>
-            <button type="button" class="icon-button" id="admin-logout" title="Выйти">${icon("Logout")}</button>
+            <div class="user-badge__actions">
+              <button type="button" class="icon-button theme-toggle" id="admin-theme-toggle" aria-label="Переключить тему">
+                ${state.theme === "dark" ? icon("Moon") : icon("Sun")}
+              </button>
+              <button type="button" class="icon-button" id="admin-logout" title="Выйти">${icon("Logout")}</button>
+            </div>
           </div>
         </div>
       </aside>
@@ -1413,6 +1435,7 @@ function bindShell(root) {
     });
   });
   root.querySelector("#admin-logout")?.addEventListener("click", logout);
+  root.querySelector("#admin-theme-toggle")?.addEventListener("click", toggleTheme);
   if (state.section === "upload") bindUploadSection(root);
   if (state.section === "sources") bindSourcesSection(root);
   if (state.section === "plans") bindPlansSection(root);
@@ -1439,6 +1462,7 @@ function render() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  applyTheme();
   render();
   bootstrap();
 });
