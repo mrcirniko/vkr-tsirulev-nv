@@ -77,12 +77,6 @@ def contract_html_to_text(contract_html: str) -> str:
     parser.close()
     return parser.get_text()
 
-
-def _contract_heading(deal_type: str | None) -> str:
-    suffix = (deal_type or "договор").replace("договор ", "", 1).strip().upper()
-    if not suffix:
-        suffix = "________________"
-    return f"ДОГОВОР {suffix}"
 def _contract_heading(deal_type: str | None) -> str:
     raw = (deal_type or "").strip()
     lower = raw.lower()
