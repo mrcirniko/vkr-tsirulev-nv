@@ -110,6 +110,8 @@ def _apply_body_formatting(document: Document) -> None:
         text = paragraph.text.strip()
         if not text:
             continue
+        if text.upper().startswith("ПРИЛОЖЕНИЕ №"):
+            paragraph.paragraph_format.page_break_before = True
         if paragraph.alignment is None:
             paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         paragraph_format = paragraph.paragraph_format

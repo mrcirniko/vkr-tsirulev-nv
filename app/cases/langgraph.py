@@ -287,6 +287,10 @@ async def start_resume_run(
         state_update["generate_optional_contract"] = is_yes
         state_update["processing_stage"] = "generate_contract" if is_yes else "generate_recommendations"
     else:
+        # Add the user's clarification answer to messages so _conversation_context
+        # shows a complete dialogue (question → answer) instead of orphaned
+        # assistant questions with no visible user reply.
+        state_update["messages"] = [{"role": "user", "content": clarification_answer}]
         state_update["processing_stage"] = (
             "classify_contract" if clarification_stage == "classification" else "analyze_norms"
         )

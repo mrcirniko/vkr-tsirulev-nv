@@ -14,9 +14,10 @@ from storage import upload_contract_docx
 
 from agent.deal_types import get_supported_deal_types
 from agent.json_utils import coerce_json
+from messages import ERROR_GENERIC_TEXT
 from agent.prompts import (
     BUILD_RETRIEVAL_QUERY_PROMPT,
-    CHECK_DATA_SUFFICIENCY_PROMPT,
+    build_check_data_sufficiency_prompt,
     CHECK_GENERAL_NORMS_PROMPT,
     CHECK_WRITTEN_FORM_PROMPT,
     CLASSIFY_FOLLOWUP_INTENT_PROMPT,
@@ -65,7 +66,7 @@ STAGE_GENERATE_CONTRACT = "generate_contract"
 STAGE_EDIT_CONTRACT = "edit_contract"
 STAGE_VALIDATE_CONTRACT = "validate_contract"
 NEW_VERSION_SAVED_AS_DOCX_MESSAGE = (
-    "Обновлённая версия договора сохранена в виде DOCX — откройте её в панели «Договоры» справа."
+    "Договор сохранен в виде DOCX — откройте его в панели «Договоры» справа."
 )
 
 
@@ -88,7 +89,9 @@ def _llm() -> ChatOllama:
     kwargs: dict[str, object] = {
         "model": settings.llm_model,
         "base_url": settings.ollama_base_url,
-        "temperature": 0,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 64,
         "reasoning": settings.llm_reasoning,
         "num_ctx": settings.llm_num_ctx,
         "num_predict": settings.llm_num_predict,
@@ -678,36 +681,6 @@ def retrieve_norms(state: ContractAgentState) -> dict:
     return {"retrieved_norms": norms, "processing_stage": STAGE_ANALYZE_NORMS}
 
 
-_PERSONAL_DATA_OPT_OUT_NOTE = (
-    "Пользователь отключил запрос личных данных. НЕ включай в clarification_question и в "
-    "missing_fields ничего, что относится к личным данным сторон: ФИО, паспортные данные, ИНН, "
-    "СНИЛС, дата рождения, адрес регистрации/проживания, телефон, email, реквизиты счёта. "
-    "Если эти поля единственное, чего не хватает — считай данных достаточно (sufficient=true). "
-    "Запрашивай только условия сделки (предмет, цена, срок, обязательства сторон, гарантии)."
-)
-
-# Strict mode: when the user asked us to collect personal data, we MUST get
-# concrete values before proceeding. Vague replies, "не помню", "пропусти",
-# random text don't satisfy the requirement — we keep asking.
-_PERSONAL_DATA_REQUIRED_NOTE = (
-    "Пользователь ВКЛЮЧИЛ запрос личных данных. Перед генерацией договора в missing_fields "
-    "ОБЯЗАТЕЛЬНО включай каждое из перечисленных ниже полей по КАЖДОЙ из сторон сделки, если "
-    "оно ещё не указано в истории сообщений КОНКРЕТНЫМ значением (не плейсхолдером, не "
-    "общими словами):\n"
-    "  • ФИО полностью (для физлица) ИЛИ полное наименование организации + ОГРН/ИНН (для юрлица);\n"
-    "  • для физлица: паспорт (серия и номер) ИЛИ ИНН;\n"
-    "  • адрес регистрации/местонахождения;\n"
-    "  • контакт (телефон или email) — желателен, но не обязателен.\n"
-    "Если пользователь отвечает уклончиво, отказывается, пишет бессмысленный текст или говорит "
-    "«пропусти/не знаю/любые/потом» — НЕ считай данные достаточными. Продолжай настойчиво "
-    "запрашивать конкретные значения. sufficient=true допустимо ТОЛЬКО когда все обязательные "
-    "поля сторон явно указаны в истории сообщений.\n"
-    "В clarification_question конкретно перечисли какие именно поля по какой стороне нужны "
-    "(пример: «Укажите ФИО, паспортные данные и адрес регистрации Покупателя»). Если "
-    "предыдущая попытка уже была — напомни, что без этих данных договор не будет сгенерирован."
-)
-
-
 def check_data_sufficiency(state: ContractAgentState) -> dict:
     fallback = {
         "missing_fields": [],
@@ -715,20 +688,21 @@ def check_data_sufficiency(state: ContractAgentState) -> dict:
         "deal_structure": state.get("deal_structure") or {},
     }
     ask_personal_data = state.get("ask_personal_data", True)
-    privacy_note = (
-        f"\n\n[ВАЖНО] {_PERSONAL_DATA_REQUIRED_NOTE}"
-        if ask_personal_data
-        else f"\n\n[ВАЖНО] {_PERSONAL_DATA_OPT_OUT_NOTE}"
+    validation_errors = [str(e) for e in (state.get("validation_errors") or []) if str(e).strip()]
+    validation_section = (
+        f"\n\n{SECTION_LABEL_VALIDATION_ERRORS}\n" + "\n".join(f"- {e}" for e in validation_errors)
+        if validation_errors
+        else ""
     )
     result = _invoke_json(
         "check_data_sufficiency",
-        CHECK_DATA_SUFFICIENCY_PROMPT,
+        build_check_data_sufficiency_prompt(ask_personal_data),
         (
             f"{SECTION_LABEL_HISTORY}\n{_conversation_context(state)}\n\n"
             f"{SECTION_LABEL_DEAL_TYPE} {state.get('deal_type') or '-'}\n\n"
             f"{SECTION_LABEL_DEAL_DESCRIPTION}\n{state.get('deal_description', '')}\n\n"
             f"{SECTION_LABEL_NORMS}\n{_norms_to_context(state.get('retrieved_norms'))}"
-            f"{privacy_note}"
+            f"{validation_section}"
         ),
         fallback=fallback,
     )
@@ -1007,16 +981,19 @@ def save_result(state: ContractAgentState) -> dict:
     if not case_id:
         return {"result_saved": False, "processing_stage": STAGE_DEFAULT}
 
-    status = CaseStatus.COMPLETED.value
-    if not state.get("general_check_passed", True) or (
+    # Terminal validation failure: exhausted all retries with errors remaining.
+    validation_exhausted = bool(
         state.get("requires_written_form")
         and state.get("validation_errors")
         and int(state.get("iteration_count", 0)) >= int(state.get("max_iterations", settings.max_iterations))
-    ):
-        status = CaseStatus.ERROR.value
+    )
+    general_blocked = not state.get("general_check_passed", True)
+
+    status = CaseStatus.ERROR.value if (general_blocked or validation_exhausted) else CaseStatus.COMPLETED.value
 
     docx_path = None
-    if state.get("contract_html"):
+    # Only produce a DOCX when the contract is actually valid and ready to deliver.
+    if state.get("contract_html") and status == CaseStatus.COMPLETED.value:
         try:
             latest_version = get_latest_version(case_id)
             next_version = 1 if latest_version is None else latest_version.version_number + 1
@@ -1033,6 +1010,7 @@ def save_result(state: ContractAgentState) -> dict:
         except Exception as exc:
             LOGGER.warning("Failed to save contract version: %s", exc)
             status = CaseStatus.ERROR.value
+            docx_path = None
 
     try:
         update_case_status(case_id, status)
@@ -1048,19 +1026,27 @@ def save_result(state: ContractAgentState) -> dict:
         LOGGER.warning("Failed to persist deal_type: %s", exc)
 
     recommendations_text = (state.get("recommendations") or "").strip()
-    contract_was_generated = bool(state.get("contract_html"))
+    docx_saved = bool(docx_path)
     edit_summary = (state.get("edit_summary") or "").strip()
     is_edit_run = state.get("intent") == "edit" and bool(edit_summary)
-    if is_edit_run:
+
+    if validation_exhausted:
+        final_text = (
+            f"{recommendations_text}\n\n---\n\n{ERROR_GENERIC_TEXT}"
+            if recommendations_text
+            else ERROR_GENERIC_TEXT
+        )
+    elif is_edit_run:
         final_text = f"{edit_summary}\n\n{NEW_VERSION_SAVED_AS_DOCX_MESSAGE}"
-    elif recommendations_text and contract_was_generated:
+    elif recommendations_text and docx_saved:
         final_text = f"{recommendations_text}\n\n---\n\n{NEW_VERSION_SAVED_AS_DOCX_MESSAGE}"
     elif recommendations_text:
         final_text = recommendations_text
-    elif contract_was_generated:
-        final_text = f"{NEW_VERSION_SAVED_AS_DOCX_MESSAGE}"
+    elif docx_saved:
+        final_text = NEW_VERSION_SAVED_AS_DOCX_MESSAGE
     else:
         final_text = "Результат обработки сохранён."
+
     update = {
         "result_saved": True,
         "result_docx_path": docx_path,

@@ -395,11 +395,11 @@ def _reference_llm() -> ChatOllama:
     return ChatOllama(
         model=settings.reference_llm_model,
         base_url=settings.reference_llm_base_url,
-        temperature=0,
+        temperature=0.1,
         num_ctx=2048,
         num_predict=512,
-        top_p=0.1,
-        top_k=1,
+        top_p=0.3,
+        top_k=20,
         reasoning=settings.reference_llm_reasoning,
     )
 

@@ -126,10 +126,6 @@ def build_state_graph() -> StateGraph:
         },
     )
     graph.add_edge("inform_user", END)
-    # New ordering: norms → written_form decision → (only when we'll generate
-    # a contract) → data sufficiency → generate_contract. This prevents the
-    # agent from harassing users for ФИО/паспорт/etc when the contract isn't
-    # going to be generated anyway (e.g. legal_only + oral deal).
     graph.add_edge("retrieve_norms", "check_written_form")
     graph.add_conditional_edges(
         "check_written_form",
@@ -168,7 +164,7 @@ def build_state_graph() -> StateGraph:
             "save_result": "save_result",
         },
     )
-    graph.add_edge("handle_validation_error", "generate_contract")
+    graph.add_edge("handle_validation_error", "check_data_sufficiency")
     graph.add_edge("save_result", END)
 
     return graph
@@ -179,97 +175,3 @@ def compile_contract_agent(*, with_checkpointer: bool):
     if with_checkpointer:
         return graph.compile(checkpointer=MemorySaver())
     return graph.compile()
-
-
-# UNUSED at runtime — these helpers form the local-invocation API (see also
-# the commented-out block below). Re-exported by agent/__init__.py for
-# convenience, but no caller imports them from there.
-# @lru_cache(maxsize=1)
-# def get_contract_agent():
-#     return compile_contract_agent(with_checkpointer=True)
-#
-#
-# def get_graph_mermaid() -> str:
-#     return get_contract_agent().get_graph().draw_mermaid()
-#
-#
-# def get_graph_png() -> bytes | None:
-#     try:
-#         return get_contract_agent().get_graph().draw_mermaid_png()
-#     except Exception:
-#         return None
-
-
-# ---------------------------------------------------------------------------
-# Local-invocation API (UNUSED at runtime).
-#
-# In production the graph runs inside langgraph_dev container; server.py talks
-# to it via HTTP (`_get_thread_state`, `_resume_after_clarification_remote` in
-# server.py). The functions below are kept as a Python-side library — handy
-# for ad-hoc debugging from `docker compose exec app python` — but they are
-# not part of any active code path and are commented out.
-# ---------------------------------------------------------------------------
-
-# def save_graph_visualization(output_dir: str | Path) -> dict[str, str]:
-#     directory = Path(output_dir)
-#     directory.mkdir(parents=True, exist_ok=True)
-#
-#     mermaid_path = directory / "contract_agent_graph.mmd"
-#     mermaid_path.write_text(get_graph_mermaid(), encoding="utf-8")
-#
-#     result = {"mermaid": str(mermaid_path)}
-#     png_bytes = get_graph_png()
-#     if png_bytes:
-#         png_path = directory / "contract_agent_graph.png"
-#         png_path.write_bytes(png_bytes)
-#         result["png"] = str(png_path)
-#     return result
-#
-#
-# def run_contract_agent(initial_state: dict[str, Any], thread_id: str):
-#     state = {
-#         "iteration_count": 0,
-#         "max_iterations": settings.max_iterations,
-#         "classification_clarification_attempts": 0,
-#         "max_classification_clarifications": settings.max_classification_clarifications,
-#         **initial_state,
-#     }
-#     return get_contract_agent().invoke(state, config={"configurable": {"thread_id": thread_id}})
-#
-#
-# def stream_contract_agent(initial_state: dict[str, Any], thread_id: str):
-#     state = {
-#         "iteration_count": 0,
-#         "max_iterations": settings.max_iterations,
-#         "classification_clarification_attempts": 0,
-#         "max_classification_clarifications": settings.max_classification_clarifications,
-#         **initial_state,
-#     }
-#     return get_contract_agent().stream(state, config={"configurable": {"thread_id": thread_id}})
-#
-#
-# def get_thread_state(thread_id: str) -> dict[str, Any]:
-#     snapshot = get_contract_agent().get_state({"configurable": {"thread_id": thread_id}})
-#     return snapshot.values if snapshot else {}
-#
-#
-# def resume_after_clarification(case_id: str, clarification_answer: str):
-#     agent = get_contract_agent()
-#     config = {"configurable": {"thread_id": case_id}}
-#     current_state = agent.get_state(config)
-#     previous = current_state.values if current_state else {}
-#     description = previous.get("deal_description", "").strip()
-#     merged_description = (description + "\nУточнение пользователя: " + clarification_answer).strip()
-#     clarification_stage = previous.get("clarification_stage")
-#     next_node = "classify_deal" if clarification_stage == "classification" else "check_data_sufficiency"
-#     agent.update_state(
-#         config,
-#         {
-#             "deal_description": merged_description,
-#             "clarification_needed": False,
-#             "clarification_question": None,
-#             "clarification_stage": None,
-#         },
-#         as_node=next_node,
-#     )
-#     return agent.invoke(None, config=config)

@@ -28,18 +28,10 @@ from db.crud import (
     update_case_title,
     update_message,
 )
+from messages import ERROR_GENERIC_TEXT, ERROR_TIMEOUT_TEXT
 from db.models import Case, CaseStatus, ContractVersion, Message, MessageStatus
 
 LOGGER = logging.getLogger("cases.service")
-
-ERROR_TIMEOUT_TEXT = (
-    "К сожалению, обработка вашего запроса заняла слишком много времени, и он был "
-    "прерван. Попробуйте отправить сообщение ещё раз — возможно, потребуется "
-    "сформулировать его короче или яснее."
-)
-ERROR_GENERIC_TEXT = (
-    "К сожалению, при обработке вашего запроса произошла ошибка. Попробуйте повторить попытку через минуту."
-)
 
 _case_locks: dict[str, asyncio.Lock] = {}
 _case_locks_guard = asyncio.Lock()

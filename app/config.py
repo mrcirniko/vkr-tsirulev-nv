@@ -130,7 +130,7 @@ class Settings:
 
     langgraph_api_url: str = os.getenv("LANGGRAPH_API_URL", "http://langgraph_dev:2024")
     langgraph_assistant_id: str = os.getenv("LANGGRAPH_ASSISTANT_ID", "contract_agent")
-    max_iterations: int = int(os.getenv("MAX_ITERATIONS", "3"))
+    max_iterations: int = int(os.getenv("MAX_ITERATIONS", "5"))
     max_classification_clarifications: int = int(os.getenv("MAX_CLASSIFICATION_CLARIFICATIONS", "5"))
     # Hard timeout for a single LangGraph run (seconds). After this we cancel
     # the run and mark the assistant message as ERROR.
