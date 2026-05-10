@@ -49,3 +49,10 @@ class ContractAgentState(MessagesState, total=False):
     # default written-form heuristic — see `_route_after_written_form`.
     contract_generation_policy: str | None  # legal_only | always | always_ask
     ask_personal_data: bool
+    # Stashed LLM exchanges (system / human prompts and raw response) for the
+    # final-version dump in save_result. Overwritten on each retry of
+    # generate_contract / edit_contract and on each pass through the
+    # recommendations pipeline; only the last (post-validation) value lands on
+    # disk. Cheap to carry, small enough not to bloat checkpoints.
+    final_contract_exchange: dict[str, str] | None
+    final_recommendations_exchange: dict[str, str] | None

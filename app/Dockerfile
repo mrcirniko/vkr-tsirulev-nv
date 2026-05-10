@@ -2,6 +2,10 @@ FROM python:3.11-slim
 WORKDIR /app
 COPY app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# pyproject.toml carries pytest + coverage + ruff config; without it the
+# in-container `pytest` runs in default mode (no addopts, asyncio=strict, no
+# coverage scope) and silently produces no report.
+COPY pyproject.toml /app/pyproject.toml
 COPY app/*.py /app/
 COPY app/admin /app/admin
 COPY app/agent /app/agent

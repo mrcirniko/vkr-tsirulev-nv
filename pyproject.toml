@@ -59,9 +59,57 @@ known-first-party = ["agent", "admin", "auth", "billing", "cases", "db", "prefer
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["app"]
+addopts = "--cov --cov-report=term-missing --cov-report=html:data/coverage_html"
 filterwarnings = [
     "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+    # langgraph internally instantiates JsonPlusSerializer without an explicit
+    # allowed_objects; nothing we can override from our side. Drop when the
+    # upstream library passes the kwarg itself.
+    "ignore:The default value of .allowed_objects. will change.*:",
 ]
+
+[tool.coverage.run]
+# Inside the `app` container the source tree lives flat under /app/ — modules
+# are importable as `agent`, `billing`, `cases`, ... (no parent `app` package).
+# `pythonpath = ["app"]` from pytest config gives the same flat namespace when
+# running on the host. Listing top-level packages + single-file modules covers
+# every production source file in both setups.
+source_pkgs = [
+    "agent",
+    "admin",
+    "auth",
+    "billing",
+    "cases",
+    "db",
+    "preferences",
+    "rag",
+    "config",
+    "contract_docx",
+    "main",
+    "messages",
+    "realtime",
+    "server",
+    "storage",
+]
+branch = true
+omit = [
+    "*/db/migrate.py",
+    "*/agent/studio_graph.py",
+    "scripts/*",
+    "tests/*",
+    "**/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+skip_covered = false
 
 [tool.ruff.format]
 quote-style = "double"

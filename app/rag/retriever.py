@@ -86,6 +86,47 @@ def _list_general_chunks() -> list[dict]:
     return chunks
 
 
+def _reranker_model_kwargs() -> dict:
+    """Translate settings.reranker_precision into model_kwargs={'torch_dtype': ...}.
+
+    Returns an empty dict for "auto" (let transformers pick — usually fp32).
+    Unknown values log a warning and fall through to auto.
+    """
+    precision = settings.reranker_precision
+    if not precision or precision == "auto":
+        return {}
+    try:
+        import torch
+    except Exception as exc:
+        LOGGER.warning("torch unavailable, ignoring RERANKER_PRECISION=%s: %s", precision, exc)
+        return {}
+    dtype_map = {
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "half": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+        "float32": torch.float32,
+        "fp32": torch.float32,
+        "full": torch.float32,
+    }
+    dtype = dtype_map.get(precision)
+    if dtype is None:
+        LOGGER.warning("Unknown RERANKER_PRECISION=%s, ignoring", precision)
+        return {}
+    return {"torch_dtype": dtype}
+
+
+def _log_reranker_actual(model) -> None:
+    """Log the device and dtype the cross-encoder actually loaded with —
+    `device=auto` in the request log doesn't tell you what was picked."""
+    try:
+        params = next(model.model.parameters())
+        LOGGER.info("Reranker loaded actual_device=%s actual_dtype=%s", params.device, params.dtype)
+    except Exception:
+        LOGGER.debug("Failed to probe reranker device/dtype", exc_info=True)
+
+
 @lru_cache(maxsize=1)
 def _reranker():
     if not settings.reranker_enabled:
@@ -93,20 +134,27 @@ def _reranker():
     from sentence_transformers import CrossEncoder
 
     requested_device = settings.reranker_device or None
+    model_kwargs = _reranker_model_kwargs()
     LOGGER.info(
-        "Loading reranker model=%s device=%s",
+        "Loading reranker model=%s device=%s precision=%s",
         settings.reranker_model,
         requested_device or "auto",
+        settings.reranker_precision or "auto",
     )
     try:
-        return (
-            CrossEncoder(settings.reranker_model, device=requested_device)
-            if requested_device
-            else CrossEncoder(settings.reranker_model)
-        )
+        kwargs: dict = {}
+        if requested_device:
+            kwargs["device"] = requested_device
+        if model_kwargs:
+            kwargs["model_kwargs"] = model_kwargs
+        model = CrossEncoder(settings.reranker_model, **kwargs)
+        _log_reranker_actual(model)
+        return model
     except Exception as exc:
         # Common case: requested CUDA but the embedder already filled VRAM.
         # Fall back to CPU rather than crashing the whole retrieval pipeline.
+        # Bf16/fp16 also keeps working on CPU (just slower than fp32 on most
+        # consumer x86), so we preserve the requested precision on fallback.
         message = str(exc).lower()
         if requested_device and ("cuda" in requested_device.lower() or "out of memory" in message):
             LOGGER.warning(
@@ -114,7 +162,12 @@ def _reranker():
                 requested_device,
                 exc,
             )
-            return CrossEncoder(settings.reranker_model, device="cpu")
+            cpu_kwargs: dict = {"device": "cpu"}
+            if model_kwargs:
+                cpu_kwargs["model_kwargs"] = model_kwargs
+            model = CrossEncoder(settings.reranker_model, **cpu_kwargs)
+            _log_reranker_actual(model)
+            return model
         LOGGER.exception("Reranker load failed; disabling reranker for this session")
         return None
 
@@ -266,10 +319,18 @@ def _fetch_reference_chunks_from_collection(
 ) -> list[dict]:
     client = _client()
     must = [FieldCondition(key="source", match=MatchValue(value=source))]
-    limit = SOURCE_EXPANSION_LIMIT
     if article_number:
         must.append(FieldCondition(key="article_number", match=MatchValue(value=article_number)))
-        limit = 1
+        # Long articles get split into multiple chunks by the chunker;
+        # `limit=1` would silently drop tail chunks. Use a generous bound so
+        # we get the whole article without abusing the index.
+        limit = settings.retrieval_reference_article_chunk_cap
+    else:
+        # Bare-source reference (LLM emitted just a name with no article, or
+        # `parse_reference` couldn't find a number): take a few representative
+        # chunks. SOURCE_EXPANSION_LIMIT is small on purpose — it's a hint,
+        # not a deep dive.
+        limit = SOURCE_EXPANSION_LIMIT
 
     points, _ = client.scroll(
         collection_name=collection_name,
@@ -294,6 +355,38 @@ def _fetch_reference_chunks(source: str, article_number: str | None) -> list[dic
     return chunks
 
 
+def _collect_next_hop_chunks(
+    seed_chunks: list[dict],
+    seen_keys: set[tuple[str, str, str, str]],
+    chunk_cap: int,
+) -> list[dict]:
+    """Walk the `references` payload on each seed and return new chunks.
+
+    Bounds fan-out via `chunk_cap` so a high-degree node in the citation
+    graph doesn't dominate the candidate set. Mutates `seen_keys` so the
+    caller's running dedup stays consistent across hops.
+    """
+    collected: list[dict] = []
+    for seed in seed_chunks:
+        if len(collected) >= chunk_cap:
+            break
+        for reference in seed.get("references") or []:
+            if len(collected) >= chunk_cap:
+                break
+            source, article_number = parse_reference(reference)
+            if not source:
+                continue
+            for payload in _fetch_reference_chunks(source=source, article_number=article_number):
+                key = _fallback_chunk_key(payload)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                collected.append(payload)
+                if len(collected) >= chunk_cap:
+                    break
+    return collected
+
+
 def retrieve_specific(
     query: str,
     source_filter: str | None = None,
@@ -309,36 +402,41 @@ def retrieve_specific(
 
         primary = _merge_points(primary_points)
         ranked_primary = _rerank(query, primary, top_k)
-        dedup: dict[tuple[str, str, str, str], dict] = {}
 
-        for payload in ranked_primary:
-            dedup[_fallback_chunk_key(payload)] = payload
+        # Reference-graph expansion. We walk `ranked_primary` references for
+        # up to `max_hops` hops, accumulating chunks not seen yet. Each hop
+        # uses the previous hop's results as seeds, so we get transitive
+        # citations (norm A → B → C). Per-hop cap keeps fan-out bounded.
+        seen_keys: set[tuple[str, str, str, str]] = {_fallback_chunk_key(p) for p in ranked_primary}
+        all_references: list[dict] = []
+        seed = ranked_primary
+        for _hop in range(max(0, settings.retrieval_reference_max_hops)):
+            hop_chunks = _collect_next_hop_chunks(
+                seed_chunks=seed,
+                seen_keys=seen_keys,
+                chunk_cap=settings.retrieval_reference_hop_chunk_cap,
+            )
+            if not hop_chunks:
+                break
+            for chunk in hop_chunks:
+                chunk.setdefault("score", None)
+            all_references.extend(hop_chunks)
+            seed = hop_chunks
 
-        for payload in ranked_primary:
-            for reference in payload.get("references", []):
-                source, article_number = parse_reference(reference)
-                if not source:
-                    continue
-                for ref_payload in _fetch_reference_chunks(source=source, article_number=article_number):
-                    key = _fallback_chunk_key(ref_payload)
-                    if key in dedup:
-                        continue
-                    ref_payload.setdefault("score", None)
-                    dedup[key] = ref_payload
-
-        primary_keys = [_fallback_chunk_key(payload) for payload in ranked_primary]
-        ordered = [dedup[key] for key in primary_keys if key in dedup]
-        for key, payload in dedup.items():
-            if key not in primary_keys:
-                ordered.append(payload)
+        # Joint rerank: a highly relevant referenced statute can outrank a
+        # weak primary tail entry now that they're scored together.
+        union = list(ranked_primary) + all_references
+        final_top_k = max(top_k, settings.retrieval_specific_expanded_top_k)
+        ordered = _rerank(query, union, final_top_k)
     finally:
         _release_embedding_memory()
     LOGGER.info(
-        "Specific retrieval query=%r source_filter=%s candidates=%s primary=%s returned=%s sources=%s",
+        "Specific retrieval query=%r source_filter=%s candidates=%s primary=%s references=%s returned=%s sources=%s",
         query,
         source_filter,
         len(primary),
         len(ranked_primary),
+        len(all_references),
         len(ordered),
         [item.get("source") for item in ordered[:10]],
     )

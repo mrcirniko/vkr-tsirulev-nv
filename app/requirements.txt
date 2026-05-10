@@ -28,3 +28,4 @@ ruff>=0.6
 yookassa>=3.0.0
 pytest>=8
 pytest-asyncio>=0.23
+pytest-cov>=5

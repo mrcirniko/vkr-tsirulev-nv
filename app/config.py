@@ -117,6 +117,21 @@ class Settings:
     retrieval_general_top_k: int = int(os.getenv("RETRIEVAL_GENERAL_TOP_K", "8"))
     retrieval_secondary_enrichment_top_k: int = int(os.getenv("RETRIEVAL_SECONDARY_ENRICHMENT_TOP_K", "5"))
     recommendation_enrichment_max_items: int = int(os.getenv("RECOMMENDATION_ENRICHMENT_MAX_ITEMS", "6"))
+    # Reference-graph expansion in retrieve_specific. Each ranked PRIMAL chunk
+    # has LLM-extracted `references` to other statutes (mostly SECONDARY); we
+    # walk this graph for `max_hops` hops, capping fan-out per hop to keep the
+    # candidate set bounded. Hop 0 is the primary search itself.
+    retrieval_reference_max_hops: int = int(os.getenv("RETRIEVAL_REFERENCE_MAX_HOPS", "2"))
+    retrieval_reference_hop_chunk_cap: int = int(os.getenv("RETRIEVAL_REFERENCE_HOP_CHUNK_CAP", "12"))
+    # Cap on chunks returned for a single reference when an exact article
+    # number is known. Long articles split across multiple chunks during
+    # indexing — we want all of them, but with a sane upper bound.
+    retrieval_reference_article_chunk_cap: int = int(os.getenv("RETRIEVAL_REFERENCE_ARTICLE_CHUNK_CAP", "20"))
+    # Final size of retrieve_specific output after reranking the union of
+    # primary + reference-expanded chunks. Defaults higher than the per-search
+    # top_k so referenced statutes have room to surface above weak primary
+    # tail entries.
+    retrieval_specific_expanded_top_k: int = int(os.getenv("RETRIEVAL_SPECIFIC_EXPANDED_TOP_K", "14"))
     retrieval_soft_source_filter: bool = os.getenv("RETRIEVAL_SOFT_SOURCE_FILTER", "true").strip().lower() in {
         "1",
         "true",
@@ -127,6 +142,12 @@ class Settings:
     reranker_model: str = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
     reranker_device: str = os.getenv("RERANKER_DEVICE", os.getenv("EMBEDDING_DEVICE", ""))
     reranker_batch_size: int = int(os.getenv("RERANKER_BATCH_SIZE", "16"))
+    # Override the precision the cross-encoder is loaded in. "auto" lets
+    # transformers pick (typically fp32). "bfloat16" / "float16" halve VRAM
+    # (~2.3 GB → ~1.2 GB for bge-reranker-v2-m3) so it fits alongside the
+    # embedding model on a single mid-range GPU. bfloat16 is preferred on
+    # Ampere+ (RTX 30/40, A100, H100) for better numerical stability.
+    reranker_precision: str = os.getenv("RERANKER_PRECISION", "auto").strip().lower()
 
     langgraph_api_url: str = os.getenv("LANGGRAPH_API_URL", "http://langgraph_dev:2024")
     langgraph_assistant_id: str = os.getenv("LANGGRAPH_ASSISTANT_ID", "contract_agent")
@@ -135,6 +156,18 @@ class Settings:
     # Hard timeout for a single LangGraph run (seconds). After this we cancel
     # the run and mark the assistant message as ERROR.
     run_timeout_seconds: int = int(os.getenv("RUN_TIMEOUT_SECONDS", "300"))
+
+    # Dump the FINAL (post-validation) contract and recommendations LLM
+    # exchanges (system + human prompts and the raw response) to per-(model,
+    # deal_type) text files. Useful for diploma evaluation / regression
+    # comparison across model variants. Disabled by default.
+    llm_dump_final_enabled: bool = os.getenv("LLM_DUMP_FINAL_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    llm_dump_final_dir: str = os.getenv("LLM_DUMP_FINAL_DIR", "data/llm_dumps")
 
     s3_enabled: bool = os.getenv("S3_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
     s3_endpoint_url: str = os.getenv("S3_ENDPOINT_URL", "http://minio:9000")

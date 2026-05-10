@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from functools import lru_cache
 from pathlib import Path
 from uuid import UUID
@@ -10,14 +11,13 @@ from config import settings
 from contract_docx import contract_html_to_text, generate_docx
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
+from messages import ERROR_GENERIC_TEXT
 from storage import upload_contract_docx
 
 from agent.deal_types import get_supported_deal_types
 from agent.json_utils import coerce_json
-from messages import ERROR_GENERIC_TEXT
 from agent.prompts import (
     BUILD_RETRIEVAL_QUERY_PROMPT,
-    build_check_data_sufficiency_prompt,
     CHECK_GENERAL_NORMS_PROMPT,
     CHECK_WRITTEN_FORM_PROMPT,
     CLASSIFY_FOLLOWUP_INTENT_PROMPT,
@@ -42,6 +42,7 @@ from agent.prompts import (
     SECTION_LABEL_SPECIFIC_NORMS,
     SECTION_LABEL_VALIDATION_ERRORS,
     VALIDATE_CONTRACT_PROMPT,
+    build_check_data_sufficiency_prompt,
     build_classify_deal_prompt,
     build_inform_unsupported_deal_prompt,
 )
@@ -65,9 +66,41 @@ STAGE_ENRICH_RECOMMENDATIONS = "enrich_recommendations"
 STAGE_GENERATE_CONTRACT = "generate_contract"
 STAGE_EDIT_CONTRACT = "edit_contract"
 STAGE_VALIDATE_CONTRACT = "validate_contract"
-NEW_VERSION_SAVED_AS_DOCX_MESSAGE = (
-    "Договор сохранен в виде DOCX — откройте его в панели «Договоры» справа."
-)
+NEW_VERSION_SAVED_AS_DOCX_MESSAGE = "Договор сохранен в виде DOCX — откройте его в панели «Договоры» справа."
+
+
+_DUMP_FILENAME_SAFE_RE = re.compile(r"[^\w.-]+", re.UNICODE)
+
+
+def _dump_final_exchange(
+    filename_kind: str,
+    deal_type: str | None,
+    system_prompt: str,
+    human_prompt: str,
+    response_text: str,
+) -> None:
+    """Persist the full final LLM exchange to {model}_{deal_type}_{kind}.txt.
+
+    Toggled via settings.llm_dump_final_enabled. Files are overwritten so the
+    artifact tracks the latest run for the (model, deal_type) pair.
+    """
+    if not settings.llm_dump_final_enabled:
+        return
+    try:
+        deal = _DUMP_FILENAME_SAFE_RE.sub("_", (deal_type or "unknown").strip()).strip("_") or "unknown"
+        model = _DUMP_FILENAME_SAFE_RE.sub("_", settings.llm_model).strip("_") or "model"
+        out_dir = Path(settings.llm_dump_final_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"{model}_{deal}_{filename_kind}.txt"
+        body = (
+            f"{LOG_SEPARATOR}\nLLM REQUEST\nSYSTEM:\n{system_prompt}\n\n"
+            f"HUMAN:\n{human_prompt}\n{LOG_SEPARATOR}\n"
+            f"LLM RESPONSE\n{response_text}\n{LOG_SEPARATOR}\n"
+        )
+        path.write_text(body, encoding="utf-8")
+        LOGGER.info("Dumped final LLM exchange (%s) to %s", filename_kind, path)
+    except Exception as exc:
+        LOGGER.warning("Failed to dump final LLM exchange (%s): %s", filename_kind, exc)
 
 
 def _log_llm_exchange(kind: str, system_prompt: str, human_prompt: str, response_text: str) -> None:
@@ -190,6 +223,45 @@ def _invoke_text(kind: str, system_prompt: str, human_prompt: str, fallback: str
     except Exception as exc:
         LOGGER.warning("Text LLM call failed in %s: %s", kind, exc)
         return fallback
+
+
+def _invoke_text_capturing(
+    kind: str, system_prompt: str, human_prompt: str, fallback: str
+) -> tuple[str, dict[str, str]]:
+    """Same as _invoke_text but also returns the {system, human, response} exchange."""
+    try:
+        content = _invoke_messages(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=human_prompt),
+            ],
+            kind=kind,
+        ).strip()
+        _log_llm_exchange(kind, system_prompt, human_prompt, content)
+        return content, {"system": system_prompt, "human": human_prompt, "response": content}
+    except Exception as exc:
+        LOGGER.warning("Text LLM call failed in %s: %s", kind, exc)
+        return fallback, {}
+
+
+def _invoke_json_capturing(
+    kind: str, system_prompt: str, human_prompt: str, fallback: dict
+) -> tuple[dict, dict[str, str]]:
+    """Same as _invoke_json but also returns the {system, human, response} exchange."""
+    try:
+        content = _invoke_messages(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=human_prompt),
+            ],
+            json_mode=True,
+            kind=kind,
+        )
+        _log_llm_exchange(kind, system_prompt, human_prompt, content)
+        return coerce_json(content), {"system": system_prompt, "human": human_prompt, "response": content}
+    except Exception as exc:
+        LOGGER.warning("JSON LLM call failed in %s: %s | content=%r", kind, exc, locals().get("content", "")[:500])
+        return fallback, {}
 
 
 def generate_case_title(description: str) -> str:
@@ -774,7 +846,7 @@ def generate_recommendations(state: ContractAgentState) -> dict:
         f"- Тип сделки: {state.get('deal_type') or 'не определен'}\n"
         f"- Письменная форма: {'требуется' if state.get('requires_written_form') else 'может не требоваться'}\n"
     )
-    recommendations = _invoke_text(
+    recommendations, exchange = _invoke_text_capturing(
         "generate_recommendations",
         GENERATE_RECOMMENDATIONS_PROMPT,
         (
@@ -786,7 +858,11 @@ def generate_recommendations(state: ContractAgentState) -> dict:
         ),
         fallback=fallback,
     )
-    return {"recommendations": recommendations, "processing_stage": STAGE_ENRICH_RECOMMENDATIONS}
+    return {
+        "recommendations": recommendations,
+        "final_recommendations_exchange": exchange or None,
+        "processing_stage": STAGE_ENRICH_RECOMMENDATIONS,
+    }
 
 
 def enrich_recommendations(state: ContractAgentState) -> dict:
@@ -867,21 +943,30 @@ def enrich_recommendations(state: ContractAgentState) -> dict:
         f"### Уточнение {i}\nИсходный фрагмент: {entry['span']}\nУточнение: {entry['clarification']}"
         for i, entry in enumerate(enrichments, 1)
     )
-    integrated = _invoke_text(
+    integrate_human = f"Текущий текст рекомендаций:\n{recommendations}\n\nУточнения:\n{enrichments_block}"
+    integrated, integrate_exchange = _invoke_text_capturing(
         "integrate_enrichments",
         INTEGRATE_ENRICHMENTS_PROMPT,
-        f"Текущий текст рекомендаций:\n{recommendations}\n\nУточнения:\n{enrichments_block}",
+        integrate_human,
         fallback=recommendations,
-    ).strip()
+    )
+    integrated = integrated.strip()
     if not integrated:
         integrated = recommendations
     LOGGER.info("enrich_recommendations: integrated %d enrichments", len(enrichments))
-    return {"recommendations": integrated, "processing_stage": STAGE_DEFAULT}
+    update: dict = {"recommendations": integrated, "processing_stage": STAGE_DEFAULT}
+    # When integration produced a usable response, treat it as the final
+    # recommendations exchange — it supersedes the generate_recommendations
+    # one. If integration failed (empty exchange / fallback), keep whatever
+    # generate_recommendations stashed.
+    if integrate_exchange:
+        update["final_recommendations_exchange"] = integrate_exchange
+    return update
 
 
 def generate_contract(state: ContractAgentState) -> dict:
     fallback_html = CONTRACT_HTML_BODY_TEMPLATE
-    contract_html = _invoke_text(
+    contract_html, exchange = _invoke_text_capturing(
         "generate_contract",
         GENERATE_CONTRACT_PROMPT,
         (
@@ -899,6 +984,7 @@ def generate_contract(state: ContractAgentState) -> dict:
     return {
         "contract_html": contract_html,
         "contract_md": contract_preview,
+        "final_contract_exchange": exchange or None,
         "processing_stage": STAGE_VALIDATE_CONTRACT,
     }
 
@@ -918,7 +1004,7 @@ def edit_contract(state: ContractAgentState) -> dict:
         "edit_summary": "Не удалось точно определить, что нужно изменить — уточните запрос.",
         "changed_sections": [],
     }
-    result = _invoke_json(
+    result, exchange = _invoke_json_capturing(
         "edit_contract",
         EDIT_CONTRACT_PROMPT,
         (f"Запрос пользователя:\n{last_user}\n\nТекущий HTML-договор:\n{current_html}"),
@@ -938,6 +1024,7 @@ def edit_contract(state: ContractAgentState) -> dict:
         "contract_md": contract_preview,
         "edit_summary": summary,
         "edit_changed_sections": changed_sections,
+        "final_contract_exchange": exchange or None,
         "processing_stage": STAGE_VALIDATE_CONTRACT,
     }
 
@@ -1017,6 +1104,30 @@ def save_result(state: ContractAgentState) -> dict:
     except Exception as exc:
         LOGGER.warning("Failed to update case status: %s", exc)
 
+    # Dump the FINAL post-validation LLM exchanges to per-(model, deal_type)
+    # text files when enabled. We only do this on COMPLETED runs so failed /
+    # validation-exhausted attempts don't pollute the artifacts.
+    if status == CaseStatus.COMPLETED.value and settings.llm_dump_final_enabled:
+        deal_type = state.get("deal_type")
+        contract_exchange = state.get("final_contract_exchange") or {}
+        if docx_path and contract_exchange:
+            _dump_final_exchange(
+                "contract",
+                deal_type,
+                contract_exchange.get("system", ""),
+                contract_exchange.get("human", ""),
+                contract_exchange.get("response", ""),
+            )
+        recommendations_exchange = state.get("final_recommendations_exchange") or {}
+        if (state.get("recommendations") or "").strip() and recommendations_exchange:
+            _dump_final_exchange(
+                "recomendations",
+                deal_type,
+                recommendations_exchange.get("system", ""),
+                recommendations_exchange.get("human", ""),
+                recommendations_exchange.get("response", ""),
+            )
+
     try:
         with session_scope() as session:
             case = session.get(Case, UUID(str(case_id)))
@@ -1032,9 +1143,7 @@ def save_result(state: ContractAgentState) -> dict:
 
     if validation_exhausted:
         final_text = (
-            f"{recommendations_text}\n\n---\n\n{ERROR_GENERIC_TEXT}"
-            if recommendations_text
-            else ERROR_GENERIC_TEXT
+            f"{recommendations_text}\n\n---\n\n{ERROR_GENERIC_TEXT}" if recommendations_text else ERROR_GENERIC_TEXT
         )
     elif is_edit_run:
         final_text = f"{edit_summary}\n\n{NEW_VERSION_SAVED_AS_DOCX_MESSAGE}"
