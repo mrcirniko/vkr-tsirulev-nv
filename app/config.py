@@ -3,9 +3,17 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import warnings
 from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
+
+# Upstream deprecation in sentence-transformers/transformers; silenced to keep logs readable.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*torch\.backends\.cuda\.sdp_kernel.*",
+    category=FutureWarning,
+)
 
 load_dotenv()
 
@@ -69,20 +77,13 @@ class Settings:
     embedding_device: str = os.getenv("EMBEDDING_DEVICE", "")
     embedding_batch_size: int = int(os.getenv("EMBEDDING_BATCH_SIZE", "16"))
     embedding_max_tokens: int = int(os.getenv("EMBEDDING_MAX_TOKENS", "4096"))
-    # Asymmetric retrieval prefix for the query side.
-    # Giga-Embeddings-instruct (ai-sage) is an instruction-tuned encoder:
-    # queries should be wrapped as `Instruct: <task>\nQuery: <text>` while
-    # documents are encoded plain. The default below is a legal-RAG-specific
-    # task instruction; override via env if you swap the corpus. An empty or
-    # unset env var falls back to this default (a literal "" disables the
-    # instruction by setting EMBEDDING_QUERY_INSTRUCTION_DISABLED=1 instead).
+    # Instruction prefix for instruction-tuned encoders (Giga-Embeddings-instruct):
+    # queries get wrapped as `Instruct: <task>\nQuery: <text>`, documents stay plain.
     embedding_query_instruction: str = (
         os.getenv("EMBEDDING_QUERY_INSTRUCTION", "").strip()
         or "Дано краткое описание сделки на русском языке. Найди статьи и положения "
         "российского гражданского законодательства, регулирующие условия такой сделки."
     )
-    # Escape hatch: set EMBEDDING_QUERY_INSTRUCTION_DISABLED=1 to drop the
-    # instruction wrapping entirely (compare with raw plain queries).
     embedding_query_instruction_disabled: bool = os.getenv(
         "EMBEDDING_QUERY_INSTRUCTION_DISABLED", "false"
     ).strip().lower() in {"1", "true", "yes", "on"}
@@ -92,10 +93,6 @@ class Settings:
         "yes",
         "on",
     }
-    # Override the precision the SentenceTransformer is loaded in. "auto" lets
-    # the model card decide (typically FP16/BF16 for modern checkpoints, FP32
-    # for older ones). Set "float16" / "bfloat16" / "float32" explicitly when
-    # tuning VRAM (e.g. fitting Giga + reranker on a 16 GB card).
     embedding_precision: str = os.getenv("EMBEDDING_PRECISION", "auto").strip().lower()
     preload_embeddings_on_startup: bool = os.getenv("PRELOAD_EMBEDDINGS_ON_STARTUP", "false").strip().lower() in {
         "1",
@@ -117,50 +114,70 @@ class Settings:
     retrieval_general_top_k: int = int(os.getenv("RETRIEVAL_GENERAL_TOP_K", "8"))
     retrieval_secondary_enrichment_top_k: int = int(os.getenv("RETRIEVAL_SECONDARY_ENRICHMENT_TOP_K", "5"))
     recommendation_enrichment_max_items: int = int(os.getenv("RECOMMENDATION_ENRICHMENT_MAX_ITEMS", "6"))
-    # Reference-graph expansion in retrieve_specific. Each ranked PRIMAL chunk
-    # has LLM-extracted `references` to other statutes (mostly SECONDARY); we
-    # walk this graph for `max_hops` hops, capping fan-out per hop to keep the
-    # candidate set bounded. Hop 0 is the primary search itself.
+    # Reference-graph expansion: walk PRIMAL chunks' LLM-extracted references for `max_hops` hops.
     retrieval_reference_max_hops: int = int(os.getenv("RETRIEVAL_REFERENCE_MAX_HOPS", "2"))
     retrieval_reference_hop_chunk_cap: int = int(os.getenv("RETRIEVAL_REFERENCE_HOP_CHUNK_CAP", "12"))
-    # Cap on chunks returned for a single reference when an exact article
-    # number is known. Long articles split across multiple chunks during
-    # indexing — we want all of them, but with a sane upper bound.
     retrieval_reference_article_chunk_cap: int = int(os.getenv("RETRIEVAL_REFERENCE_ARTICLE_CHUNK_CAP", "20"))
-    # Final size of retrieve_specific output after reranking the union of
-    # primary + reference-expanded chunks. Defaults higher than the per-search
-    # top_k so referenced statutes have room to surface above weak primary
-    # tail entries.
     retrieval_specific_expanded_top_k: int = int(os.getenv("RETRIEVAL_SPECIFIC_EXPANDED_TOP_K", "14"))
-    retrieval_soft_source_filter: bool = os.getenv("RETRIEVAL_SOFT_SOURCE_FILTER", "true").strip().lower() in {
+    # LLM filter over reranked union: conservative — ambiguity keeps the chunk.
+    retrieval_filter_enabled: bool = os.getenv("RETRIEVAL_FILTER_ENABLED", "true").strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
     }
+    retrieval_filter_text_preview_chars: int = int(os.getenv("RETRIEVAL_FILTER_TEXT_PREVIEW_CHARS", "600"))
+    # 0 disables batching (single LLM call with all chunks).
+    retrieval_filter_batch_size: int = int(os.getenv("RETRIEVAL_FILTER_BATCH_SIZE", "0"))
+
+    # Alternative iterative retrieval path. Disabled by default — A/B against retrieve_specific.
+    retrieval_iterative_enabled: bool = os.getenv("RETRIEVAL_ITERATIVE_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    retrieval_iterative_target_articles: int = int(os.getenv("RETRIEVAL_ITERATIVE_TARGET_ARTICLES", "20"))
+    retrieval_iterative_max_queries: int = int(os.getenv("RETRIEVAL_ITERATIVE_MAX_QUERIES", "10"))
+    retrieval_iterative_top_k_per_query: int = int(os.getenv("RETRIEVAL_ITERATIVE_TOP_K_PER_QUERY", "10"))
+    retrieval_iterative_vague_enrichment_max_items: int = int(
+        os.getenv("RETRIEVAL_ITERATIVE_VAGUE_ENRICHMENT_MAX_ITEMS", "6")
+    )
+
+    # Follow-up sub-agent: iterative SECONDARY search when followup_response lacks chunks in state.
+    followup_subagent_max_attempts: int = int(os.getenv("FOLLOWUP_SUBAGENT_MAX_ATTEMPTS", "5"))
+    followup_subagent_top_k: int = int(os.getenv("FOLLOWUP_SUBAGENT_TOP_K", "5"))
     reranker_enabled: bool = os.getenv("RERANKER_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
     reranker_model: str = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
     reranker_device: str = os.getenv("RERANKER_DEVICE", os.getenv("EMBEDDING_DEVICE", ""))
     reranker_batch_size: int = int(os.getenv("RERANKER_BATCH_SIZE", "16"))
-    # Override the precision the cross-encoder is loaded in. "auto" lets
-    # transformers pick (typically fp32). "bfloat16" / "float16" halve VRAM
-    # (~2.3 GB → ~1.2 GB for bge-reranker-v2-m3) so it fits alongside the
-    # embedding model on a single mid-range GPU. bfloat16 is preferred on
-    # Ampere+ (RTX 30/40, A100, H100) for better numerical stability.
     reranker_precision: str = os.getenv("RERANKER_PRECISION", "auto").strip().lower()
+    # Ignored by plain cross-encoders (bge); applies to instruction-tuned ones (Qwen3-Reranker).
+    reranker_max_length: int = int(os.getenv("RERANKER_MAX_LENGTH", "2048"))
+    reranker_task_instruction: str = (
+        os.getenv("RERANKER_TASK_INSTRUCTION", "").strip()
+        or "Дано краткое описание сделки на русском языке. Найди статьи и положения "
+        "российского гражданского законодательства, регулирующие условия такой сделки."
+    )
 
     langgraph_api_url: str = os.getenv("LANGGRAPH_API_URL", "http://langgraph_dev:2024")
     langgraph_assistant_id: str = os.getenv("LANGGRAPH_ASSISTANT_ID", "contract_agent")
     max_iterations: int = int(os.getenv("MAX_ITERATIONS", "5"))
     max_classification_clarifications: int = int(os.getenv("MAX_CLASSIFICATION_CLARIFICATIONS", "5"))
-    # Hard timeout for a single LangGraph run (seconds). After this we cancel
-    # the run and mark the assistant message as ERROR.
+
+    # RAG-assisted classification: bounded PRIMAL queries on low/medium confidence.
+    # Sub-agent chunks are scratch-only — never persisted to state or messages.
+    classify_rag_assist_enabled: bool = os.getenv("CLASSIFY_RAG_ASSIST_ENABLED", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    classify_rag_assist_max_queries: int = int(os.getenv("CLASSIFY_RAG_ASSIST_MAX_QUERIES", "3"))
+    classify_rag_assist_top_k_per_query: int = int(os.getenv("CLASSIFY_RAG_ASSIST_TOP_K_PER_QUERY", "5"))
     run_timeout_seconds: int = int(os.getenv("RUN_TIMEOUT_SECONDS", "300"))
 
-    # Dump the FINAL (post-validation) contract and recommendations LLM
-    # exchanges (system + human prompts and the raw response) to per-(model,
-    # deal_type) text files. Useful for diploma evaluation / regression
-    # comparison across model variants. Disabled by default.
+    # Dump final contract/recommendations LLM exchanges for regression analysis.
     llm_dump_final_enabled: bool = os.getenv("LLM_DUMP_FINAL_ENABLED", "false").strip().lower() in {
         "1",
         "true",
@@ -189,24 +206,18 @@ class Settings:
     google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "")
     google_client_secret: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
     google_redirect_uri: str = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:3000/api/auth/google/callback")
-    # Yandex OAuth for end-users (optional; disabled when creds are empty).
     yandex_client_id: str = os.getenv("YANDEX_CLIENT_ID", "").strip()
     yandex_client_secret: str = os.getenv("YANDEX_CLIENT_SECRET", "").strip()
     yandex_redirect_uri: str = os.getenv("YANDEX_REDIRECT_URI", "http://localhost:3000/api/auth/yandex/callback")
     seed_admin_email: str = os.getenv("SEED_ADMIN_EMAIL", "admin@local")
-    # Owner credentials — the top-level operator with exclusive rights to manage
-    # admins. Auth is verified directly against these env vars (never stored in
-    # admin_users). Leave both empty to run without an owner account.
-    # OWNER_USERNAME / OWNER_PASSWORD take precedence; ADMIN_USERNAME /
-    # ADMIN_PASSWORD are accepted as a backward-compatible fallback.
+    # Owner credentials are checked against env vars directly, never stored in admin_users.
+    # OWNER_* preferred; ADMIN_* accepted as backward-compatible fallback.
     owner_username: str = os.getenv("OWNER_USERNAME", "").strip() or os.getenv("ADMIN_USERNAME", "").strip()
     owner_password: str = os.getenv("OWNER_PASSWORD", "") or os.getenv("ADMIN_PASSWORD", "")
     admin_npa_bucket: str = os.getenv("ADMIN_NPA_BUCKET", "admin-npa")
     admin_npa_max_upload_mb: int = int(os.getenv("ADMIN_NPA_MAX_UPLOAD_MB", "50"))
 
-    # Billing (YooKassa). Empty creds disable billing entirely: /api/billing/*
-    # routes return 503 and the frontend hides upgrade CTAs. Test/prod is
-    # decided by the shop_id you registered, not by a flag.
+    # Empty YooKassa creds disable /api/billing/* (returns 503).
     yookassa_shop_id: str = os.getenv("YOOKASSA_SHOP_ID", "").strip()
     yookassa_secret_key: str = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
     yookassa_test_mode: bool = os.getenv("YOOKASSA_TEST_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -244,7 +255,7 @@ def _validate(s: Settings) -> Settings:
                 raise RuntimeError(msg)
             LOGGER.warning("config: %s (allowed only in dev)", msg)
     if not s.session_secret:
-        # Per-process random secret for dev; sessions invalidate on restart.
+        # Ephemeral per-process secret for dev — invalidates sessions on restart.
         object.__setattr__(s, "session_secret", secrets.token_urlsafe(48))
         LOGGER.warning("config: SESSION_SECRET not set; generated ephemeral secret")
     return s

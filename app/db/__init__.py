@@ -5,7 +5,6 @@ from db.crud import (
     get_contract_versions,
     get_latest_version,
     get_messages,
-    # list_cases,  # UNUSED — see crud.py
     save_contract_version,
     update_case_status,
 )
@@ -25,7 +24,6 @@ __all__ = [
     "init_db",
     "create_case",
     "get_case",
-    # "list_cases",  # UNUSED
     "add_message",
     "get_messages",
     "save_contract_version",

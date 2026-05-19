@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import re
+from typing import Literal
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -117,6 +118,8 @@ class NpaSourceDTO(BaseModel):
 class IndexRequest(BaseModel):
     source_group: str = Field(..., description="general | primal | secondary")
     recreate_collection: bool = False
+    # True: idempotent re-index (replaces source chunks). False: append. Ignored if recreate_collection=True.
+    delete_existing_for_source: bool = True
 
 
 class UploadResultItem(BaseModel):
@@ -254,6 +257,55 @@ def me(admin: AdminPrincipal | None = Depends(current_admin)) -> dict:
     return {"id": admin.id, "username": admin.username, "is_owner": admin.is_owner}
 
 
+# ---- Admin theme preference ----
+
+_ALLOWED_THEMES = ("dark", "light")
+
+
+class _ThemeDTO(BaseModel):
+    # None means no explicit choice — frontend falls back to prefers-color-scheme.
+    theme: Literal["dark", "light"] | None = None
+
+
+class _ThemeUpdateDTO(BaseModel):
+    theme: Literal["dark", "light"]
+
+
+@router.get("/theme", response_model=_ThemeDTO)
+def get_admin_theme_route(
+    request: Request,
+    admin: AdminPrincipal = Depends(require_admin),
+) -> _ThemeDTO:
+    """Owner stores theme in the session cookie (no DB row); DB admins
+    persist it on `admin_users.theme`. Returns None when nothing has been
+    explicitly chosen yet — frontend then uses system theme."""
+    if admin.is_owner:
+        return _ThemeDTO(theme=request.session.get("owner_theme"))
+    from db.crud import get_admin_theme
+
+    return _ThemeDTO(theme=get_admin_theme(admin.id))
+
+
+@router.put("/theme", response_model=_ThemeDTO)
+def put_admin_theme_route(
+    payload: _ThemeUpdateDTO,
+    request: Request,
+    admin: AdminPrincipal = Depends(require_admin),
+) -> _ThemeDTO:
+    if payload.theme not in _ALLOWED_THEMES:
+        raise HTTPException(400, f"theme must be one of {_ALLOWED_THEMES}")
+    if admin.is_owner:
+        request.session["owner_theme"] = payload.theme
+        return _ThemeDTO(theme=payload.theme)
+    from db.crud import set_admin_theme
+
+    try:
+        stored = set_admin_theme(admin.id, payload.theme)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return _ThemeDTO(theme=stored)
+
+
 # ---- Source registry (for the upload dropdown) ----
 
 
@@ -370,13 +422,11 @@ async def _process_one_upload(file: UploadFile, admin_id, extract_references: bo
             chunk_text,
             text,
             source_name,
-            PRIMAL_GROUP,  # placeholder for is_general flag — actual group
-            # picked at indexing time, patched into chunks then.
+            PRIMAL_GROUP,  # placeholder — actual group set at indexing time
             "llm" if extract_references else "morphology",
         )
         if not extract_references:
-            # Operator opted out of reference detection entirely. Wipe any
-            # refs the chunker may have produced from rule-based regexes.
+            # Wipe any regex-derived refs when operator opted out.
             for chunk in chunks:
                 chunk["references"] = []
         chunks_json = json.dumps(chunks, ensure_ascii=False, indent=2)
@@ -454,6 +504,7 @@ async def start_index(
         npa_id=str(npa.id),
         source_group=payload.source_group,
         recreate_collection=payload.recreate_collection,
+        delete_existing_for_source=payload.delete_existing_for_source,
     )
     return {"status": "scheduled"}
 
@@ -641,9 +692,15 @@ async def admin_ws(ws: WebSocket) -> None:
         return
     await ws.accept()
     await ADMIN_WS.register(admin_id, ws)
+    # Snapshot lets a reloaded page rebuild progressMap without waiting for the next event.
+    try:
+        from admin.tasks import snapshot_live_progress
+
+        await ws.send_json({"type": "admin_npa_progress_snapshot", "items": snapshot_live_progress()})
+    except Exception:
+        LOGGER.exception("Failed to send progress snapshot on admin WS connect")
     try:
         while True:
-            # We don't expect inbound messages — just keep the socket open.
             await ws.receive_text()
     except WebSocketDisconnect:
         pass

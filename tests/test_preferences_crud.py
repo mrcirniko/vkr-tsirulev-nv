@@ -58,6 +58,7 @@ def _row(**overrides):
         user_id=uuid4(),
         contract_generation_policy="legal_only",
         ask_personal_data=True,
+        theme="dark",
     )
     for key, value in overrides.items():
         setattr(base, key, value)

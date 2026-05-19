@@ -40,19 +40,22 @@ class ContractAgentState(MessagesState, total=False):
     contract_valid: bool | None
     edit_summary: str | None
     edit_changed_sections: list[str] | None
-    # Billing context: pushed in by server.py when starting a run so
-    # `gate_free_plan` can short-circuit edit requests on the free tier
-    # without an extra DB call from inside graph nodes.
+    # Billing/preferences injected by server.py per run — graph nodes read without extra DB calls.
     user_plan: str | None
     allow_edit: bool
-    # User preferences (also injected by server.py per run). They override the
-    # default written-form heuristic — see `_route_after_written_form`.
     contract_generation_policy: str | None  # legal_only | always | always_ask
     ask_personal_data: bool
-    # Stashed LLM exchanges (system / human prompts and raw response) for the
-    # final-version dump in save_result. Overwritten on each retry of
-    # generate_contract / edit_contract and on each pass through the
-    # recommendations pipeline; only the last (post-validation) value lands on
-    # disk. Cheap to carry, small enough not to bloat checkpoints.
+    # Last-pass LLM exchanges for save_result dump; overwritten on each retry.
     final_contract_exchange: dict[str, str] | None
     final_recommendations_exchange: dict[str, str] | None
+    # Wall-clock latency of retrieve_norms only (captured inside the node).
+    retrieve_norms_latency_ms: float | None
+    # Follow-up sub-agent state: brief, question and query history persist across attempts;
+    # per-attempt chunks are not carried forward.
+    subagent_active: bool
+    subagent_brief: str | None
+    subagent_user_question: str | None
+    subagent_query: str | None
+    subagent_query_history: list[str] | None
+    subagent_attempts: int
+    subagent_max_attempts: int

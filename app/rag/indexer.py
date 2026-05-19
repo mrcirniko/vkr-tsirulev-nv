@@ -185,11 +185,7 @@ class NormIndexer:
         import time
 
         total = len(chunks)
-        # Throttle progress emissions: WS events arriving faster than the
-        # browser repaints (~16ms) result in only the LAST one being painted,
-        # so the bar appeared to jump straight to 100%. 150ms gives ~6 visible
-        # frames per second — smooth enough for the eye, sparse enough for the
-        # WS channel. The 0% (initial) and 100% (final) ticks are always sent.
+        # Throttle progress to ~6 fps so the UI bar paints smoothly; 0% and 100% always fire.
         last_emit = 0.0
 
         def _tick(done: int, *, force: bool = False) -> None:

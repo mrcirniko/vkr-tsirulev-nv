@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from functools import lru_cache
 from pathlib import Path
 from uuid import UUID
@@ -23,14 +24,20 @@ from agent.prompts import (
     CLASSIFY_FOLLOWUP_INTENT_PROMPT,
     CLASSIFY_YESNO_PROMPT,
     CONTRACT_HTML_BODY_TEMPLATE,
+    DETECT_VAGUE_REFERENCES_IN_NORMS_PROMPT,
     DETECT_VAGUE_REFERENCES_PROMPT,
     EDIT_CONTRACT_PROMPT,
+    FILTER_RETRIEVED_NORMS_PROMPT,
     FOLLOWUP_RESPONSE_PROMPT,
+    FOLLOWUP_SUBAGENT_PROMPT,
+    FOLLOWUP_TRIAGE_PROMPT,
     GENERATE_CASE_TITLE_PROMPT,
     GENERATE_CONTRACT_PROMPT,
     GENERATE_RECOMMENDATIONS_PROMPT,
     INFORM_USER_PROMPT,
     INTEGRATE_ENRICHMENTS_PROMPT,
+    ITERATIVE_RELEVANCE_JUDGE_PROMPT,
+    ITERATIVE_RETRIEVAL_PLANNER_PROMPT,
     LEGAL_ASSISTANT_SYSTEM_PROMPT,
     RAG_SUBAGENT_PROMPT,
     SECTION_LABEL_DEAL_DESCRIPTION,
@@ -44,13 +51,22 @@ from agent.prompts import (
     VALIDATE_CONTRACT_PROMPT,
     build_check_data_sufficiency_prompt,
     build_classify_deal_prompt,
+    build_classify_rag_assist_prompt,
     build_inform_unsupported_deal_prompt,
 )
 from agent.state import ContractAgentState
 from db.crud import get_latest_version, save_contract_version, session_scope, update_case_status
 from db.models import Case, CaseStatus
+from rag.chunker import parse_reference
 from rag.ollama import unload_ollama_model
-from rag.retriever import retrieve_general, retrieve_secondary, retrieve_specific
+from rag.retriever import (
+    fetch_reference_chunks_by_payload,
+    rerank_chunks,
+    retrieve_general,
+    retrieve_secondary,
+    retrieve_specific,
+    search_primal_bi_encoder,
+)
 from rag.source_registry import infer_specific_source_filter
 
 LOGGER = logging.getLogger("agent.nodes")
@@ -66,7 +82,13 @@ STAGE_ENRICH_RECOMMENDATIONS = "enrich_recommendations"
 STAGE_GENERATE_CONTRACT = "generate_contract"
 STAGE_EDIT_CONTRACT = "edit_contract"
 STAGE_VALIDATE_CONTRACT = "validate_contract"
+STAGE_FOLLOWUP_SUBAGENT = "followup_subagent"
 NEW_VERSION_SAVED_AS_DOCX_MESSAGE = "Договор сохранен в виде DOCX — откройте его в панели «Договоры» справа."
+FOLLOWUP_SUBAGENT_GIVE_UP_MESSAGE = (
+    "К сожалению, в доступных мне источниках законодательства РФ не нашлось "
+    "однозначного ответа на ваш вопрос. Попробуйте уточнить вопрос или "
+    "сформулировать его иначе."
+)
 
 
 _DUMP_FILENAME_SAFE_RE = re.compile(r"[^\w.-]+", re.UNICODE)
@@ -351,10 +373,7 @@ def route_user_message(state: ContractAgentState) -> dict:
     LOGGER.info("route_user_message intent=%s last_user=%r", intent, last_user[:120])
 
     if intent == "edit":
-        # Edit only makes sense when a contract was actually generated
-        # before. If the prior run only produced recommendations (no
-        # contract_html), fall back to regenerate so the user gets a real
-        # draft to edit on the next round.
+        # Fall back to regenerate if no prior contract exists to edit.
         if not (state.get("contract_html") or "").strip():
             LOGGER.info("route_user_message edit→regenerate (no prior contract)")
             intent = "regenerate"
@@ -390,42 +409,207 @@ def route_user_message(state: ContractAgentState) -> dict:
     return {"intent": "followup", "processing_stage": STAGE_DEFAULT}
 
 
-# Re-export for graph wiring + back-compat. The implementation lives in
-# agent/gate.py so tests can import it without dragging in LangChain / Ollama
-# / html2docx that this module needs at import time.
+# Re-exported from agent/gate.py so tests can import without pulling LangChain/Ollama/html2docx.
 from agent.gate import FREE_EDIT_REFUSAL_TEXT, gate_free_plan  # noqa: E402, F401
 
 
-def followup_response(state: ContractAgentState) -> dict:
-    """Conversational answer using existing case context — no contract regeneration."""
-    last_user = _last_user_message(state) or "(пустое сообщение)"
+def _followup_state_context(state: ContractAgentState, last_user: str) -> str:
+    """Common context block used by the follow-up triage and as a fallback
+    answer path. Centralizes the section layout so both callers see the same
+    view of the case."""
     contract_preview = (state.get("contract_md") or "").strip() or "Договор пока не сформирован."
     recommendations = (state.get("recommendations") or "").strip() or "Рекомендации пока не сформированы."
-    fallback = (
-        "Похоже, у меня сейчас нет дополнительной информации по вашему вопросу. "
-        "Уточните, пожалуйста, что именно вас интересует."
+    return (
+        f"{SECTION_LABEL_HISTORY}\n{_conversation_context(state)}\n\n"
+        f"{SECTION_LABEL_DEAL_TYPE} {state.get('deal_type') or '-'}\n\n"
+        f"{SECTION_LABEL_DEAL_DESCRIPTION}\n{state.get('deal_description', '')}\n\n"
+        f"{SECTION_LABEL_GENERAL_NORMS}\n{_norms_to_context(state.get('general_norms'))}\n\n"
+        f"{SECTION_LABEL_SPECIFIC_NORMS}\n{_norms_to_context(state.get('retrieved_norms'))}\n\n"
+        f"Текущие рекомендации (ранее отправлены пользователю):\n{recommendations}\n\n"
+        f"Текущий проект договора (текстовое превью):\n{contract_preview}\n\n"
+        f"Новое сообщение пользователя:\n{last_user}"
     )
 
-    answer = _invoke_text(
-        "followup_response",
-        FOLLOWUP_RESPONSE_PROMPT,
-        (
-            f"{SECTION_LABEL_HISTORY}\n{_conversation_context(state)}\n\n"
-            f"{SECTION_LABEL_DEAL_TYPE} {state.get('deal_type') or '-'}\n\n"
-            f"{SECTION_LABEL_DEAL_DESCRIPTION}\n{state.get('', '')}\n\n"
-            f"{SECTION_LABEL_GENERAL_NORMS}\n{_norms_to_context(state.get('general_norms'))}\n\n"
-            f"{SECTION_LABEL_SPECIFIC_NORMS}\n{_norms_to_context(state.get('retrieved_norms'))}\n\n"
-            f"Текущие рекомендации (ранее отправлены пользователю):\n{recommendations}\n\n"
-            f"Текущий проект договора (текстовое превью):\n{contract_preview}\n\n"
-            f"Новое сообщение пользователя:\n{last_user}"
-        ),
-        fallback=fallback,
-    )
 
+def _clear_subagent_state() -> dict:
+    """State patch that resets sub-agent fields so the next follow-up turn
+    starts clean. Used both on `answer` mode and after the sub-agent loop
+    terminates (found / give_up / max_attempts)."""
     return {
+        "subagent_active": False,
+        "subagent_brief": None,
+        "subagent_user_question": None,
+        "subagent_query": None,
+        "subagent_query_history": None,
+        "subagent_attempts": 0,
+    }
+
+
+def followup_response(state: ContractAgentState) -> dict:
+    """Triage a follow-up turn: either answer from existing state or delegate
+    to the iterative `followup_subagent_search` loop.
+
+    Returns a JSON-mode decision from the LLM. On `answer` we emit the
+    message and END. On `delegate` we stash the sub-agent brief + initial
+    query in state; the conditional edge then routes to the search loop.
+    """
+    last_user = _last_user_message(state) or "(пустое сообщение)"
+    context_block = _followup_state_context(state, last_user)
+
+    decision = _invoke_json(
+        "followup_triage",
+        FOLLOWUP_TRIAGE_PROMPT,
+        context_block,
+        fallback={"mode": "answer", "answer": ""},
+    )
+    mode = str(decision.get("mode") or "").strip().lower()
+    max_attempts = max(1, int(settings.followup_subagent_max_attempts))
+
+    if mode == "delegate":
+        brief = str(decision.get("subagent_brief") or "").strip()
+        initial_query = str(decision.get("initial_query") or "").strip()
+        if brief and initial_query:
+            LOGGER.info(
+                "followup_response delegating to sub-agent brief_chars=%s initial_query=%r",
+                len(brief),
+                initial_query,
+            )
+            return {
+                "intent": "followup",
+                "processing_stage": STAGE_FOLLOWUP_SUBAGENT,
+                "subagent_active": True,
+                "subagent_brief": brief,
+                "subagent_user_question": last_user,
+                "subagent_query": initial_query,
+                "subagent_query_history": [],
+                "subagent_attempts": 0,
+                "subagent_max_attempts": max_attempts,
+            }
+        LOGGER.warning("followup_response delegate mode missing brief/query; falling back to answer")
+
+    answer = (decision.get("answer") or "").strip() if isinstance(decision.get("answer"), str) else ""
+    if not answer:
+        # Re-invoke with the legacy text prompt as a fallback for empty/malformed JSON.
+        answer = _invoke_text(
+            "followup_response_fallback",
+            FOLLOWUP_RESPONSE_PROMPT,
+            context_block,
+            fallback=(
+                "Похоже, у меня сейчас нет дополнительной информации по вашему вопросу. "
+                "Уточните, пожалуйста, что именно вас интересует."
+            ),
+        )
+
+    update = {
         **_state_messages_update(answer),
         "intent": "followup",
         "processing_stage": STAGE_DEFAULT,
+    }
+    update.update(_clear_subagent_state())
+    return update
+
+
+def followup_subagent_search(state: ContractAgentState) -> dict:
+    """One iteration of the follow-up sub-agent search loop.
+
+    Retrieves SECONDARY chunks for the current query, asks the LLM to either
+    answer with citations, reformulate the query, or give up. Loops back to
+    itself (via the graph's conditional edge) until an answer is found, the
+    LLM gives up, or `subagent_max_attempts` is reached.
+
+    State invariants:
+      - `subagent_brief` and `subagent_user_question` are set by the parent
+        and never change inside the loop.
+      - `subagent_query` is replaced on each `continue` iteration.
+      - `subagent_query_history` accumulates queries already tried so the LLM
+        doesn't repeat them.
+      - chunks retrieved during one iteration do NOT carry over.
+    """
+    brief = (state.get("subagent_brief") or "").strip()
+    user_question = (state.get("subagent_user_question") or "").strip()
+    query = (state.get("subagent_query") or "").strip()
+    attempts = int(state.get("subagent_attempts", 0))
+    max_attempts = max(1, int(state.get("subagent_max_attempts", settings.followup_subagent_max_attempts)))
+    history = list(state.get("subagent_query_history") or [])
+
+    if not brief or not query:
+        LOGGER.warning("followup_subagent_search: missing brief or query, ending loop")
+        return {
+            **_state_messages_update(FOLLOWUP_SUBAGENT_GIVE_UP_MESSAGE),
+            "intent": "followup",
+            "processing_stage": STAGE_DEFAULT,
+            **_clear_subagent_state(),
+        }
+
+    # Per-iteration fresh SECONDARY retrieval — chunks do not persist across attempts.
+    chunks = retrieve_secondary(query, top_k=settings.followup_subagent_top_k)
+    LOGGER.info(
+        "followup_subagent_search attempt=%s/%s query=%r chunks=%s",
+        attempts + 1,
+        max_attempts,
+        query,
+        len(chunks),
+    )
+
+    history_block = (
+        "\n".join(f"- {q}" for q in history) if history else "(пока не было предыдущих запросов)"
+    )
+
+    human_prompt = (
+        f"Бриф от родительского агента:\n{brief}\n\n"
+        f"Вопрос пользователя:\n{user_question or '(не указан)'}\n\n"
+        f"Текущий поисковый запрос:\n{query}\n\n"
+        f"Уже использованные формулировки запроса:\n{history_block}\n\n"
+        f"Найденные нормы (выборка по текущему запросу):\n{_norms_to_context(chunks, limit=len(chunks))}"
+    )
+
+    decision = _invoke_json(
+        f"followup_subagent_attempt_{attempts + 1}",
+        FOLLOWUP_SUBAGENT_PROMPT,
+        human_prompt,
+        fallback={"status": "give_up", "reason": "LLM-вызов не удался"},
+    )
+    status = str(decision.get("status") or "").strip().lower()
+    new_history = [*history, query]
+
+    if status == "found":
+        answer_text = (decision.get("answer") or "").strip() if isinstance(decision.get("answer"), str) else ""
+        if not answer_text:
+            answer_text = FOLLOWUP_SUBAGENT_GIVE_UP_MESSAGE
+        LOGGER.info("followup_subagent_search found answer after %s attempt(s)", attempts + 1)
+        return {
+            **_state_messages_update(answer_text),
+            "intent": "followup",
+            "processing_stage": STAGE_DEFAULT,
+            **_clear_subagent_state(),
+        }
+
+    next_attempts = attempts + 1
+    if status == "continue" and next_attempts < max_attempts:
+        next_query = (decision.get("next_query") or "").strip() if isinstance(decision.get("next_query"), str) else ""
+        # Treat blank/duplicate next_query as give_up — don't burn attempts on duplicates.
+        if not next_query or next_query == query or next_query in new_history:
+            LOGGER.info("followup_subagent_search continue with degenerate next_query=%r — giving up", next_query)
+        else:
+            return {
+                "intent": "followup",
+                "processing_stage": STAGE_FOLLOWUP_SUBAGENT,
+                "subagent_active": True,
+                "subagent_query": next_query,
+                "subagent_query_history": new_history,
+                "subagent_attempts": next_attempts,
+            }
+
+    # give_up, max attempts reached, or degenerate continue.
+    if next_attempts >= max_attempts:
+        LOGGER.info("followup_subagent_search exhausted %s attempts without an answer", next_attempts)
+    else:
+        LOGGER.info("followup_subagent_search gave up: %s", decision.get("reason"))
+    return {
+        **_state_messages_update(FOLLOWUP_SUBAGENT_GIVE_UP_MESSAGE),
+        "intent": "followup",
+        "processing_stage": STAGE_DEFAULT,
+        **_clear_subagent_state(),
     }
 
 
@@ -478,8 +662,8 @@ def _norms_to_context(
 
 
 def _source_filter_for_deal(deal_type: str | None, deal_description: str | None = None) -> str | None:
-    text = " ".join(part for part in (deal_type or "", deal_description or "") if part).strip()
-    return infer_specific_source_filter(text) if text else None
+    """Source filter disabled; signature kept so callers don't need to change if it's restored."""
+    return None
 
 
 def _state_messages_update(text: str) -> dict:
@@ -540,9 +724,159 @@ def _conversation_context(state: ContractAgentState) -> str:
 
 
 def load_general_norms(state: ContractAgentState) -> dict:
-    # General norms are retrieved after classification using the case query.
-    # Keeping this node as a no-op preserves the graph shape and old saved runs.
+    # No-op kept to preserve graph shape and saved-run compatibility.
     return {"processing_stage": STAGE_CLASSIFY_CONTRACT}
+
+
+_PAREN_TAIL_RE = re.compile(r"\s*\([^)]*\)\s*")
+
+
+def _resolve_deal_type(raw: object) -> str | None:
+    """Map an LLM-returned deal_type to a canonical entry in the catalog.
+
+    The classifier prompt asks for the exact catalog name, but in practice
+    models drift: different case, trailing whitespace, dropped parenthetical
+    suffixes ("договор безвозмездного пользования" vs catalog's
+    "договор безвозмездного пользования (ссуды)"). Strict `in` matching
+    silently fails on all of these and routes the case to
+    `inform_unsupported_deal`, contradicting the model's intent.
+
+    Lookup layers, in order:
+      1. exact match (fast path, returns canonical as-is)
+      2. case-insensitive equality
+      3. parenthetical-tolerant case-insensitive equality
+    Returns the canonical catalog name on match, None on no match.
+    """
+    if not isinstance(raw, str):
+        return None
+    cleaned = raw.strip()
+    if not cleaned:
+        return None
+
+    supported = get_supported_deal_types()
+
+    if cleaned in supported:
+        return cleaned
+
+    cleaned_lower = cleaned.lower()
+    for canonical in supported:
+        if canonical.lower() == cleaned_lower:
+            return canonical
+
+    cleaned_stripped = _PAREN_TAIL_RE.sub(" ", cleaned_lower).strip()
+    if not cleaned_stripped:
+        return None
+    for canonical in supported:
+        canonical_stripped = _PAREN_TAIL_RE.sub(" ", canonical.lower()).strip()
+        if canonical_stripped == cleaned_stripped:
+            LOGGER.info(
+                "Resolved LLM deal_type %r to canonical %r via parenthetical-tolerant match",
+                cleaned,
+                canonical,
+            )
+            return canonical
+
+    LOGGER.info("Deal type %r not in supported catalog — treating as unsupported", cleaned)
+    return None
+
+
+_RAG_ASSIST_CHUNK_PREVIEW_CHARS = 350
+
+
+def _summarize_chunks_for_classifier(chunks: list[dict]) -> str:
+    """Compact representation of bi-encoder hits for the RAG-assist sub-agent
+    prompt. Used purely as transient context — never persisted to state."""
+    if not chunks:
+        return "(ничего не нашлось)"
+    parts: list[str] = []
+    for chunk in chunks:
+        source = (chunk.get("source") or "-").strip()
+        article = (chunk.get("article") or chunk.get("article_number") or "-")
+        text = (chunk.get("text") or "").strip().replace("\n", " ")
+        if len(text) > _RAG_ASSIST_CHUNK_PREVIEW_CHARS:
+            text = text[:_RAG_ASSIST_CHUNK_PREVIEW_CHARS].rstrip() + "..."
+        parts.append(f"- [{source}, {article}] {text}")
+    return "\n".join(parts)
+
+
+def _classify_with_rag_assist(
+    description: str,
+    fallback_deal_type: str | None,
+) -> tuple[str | None, str]:
+    """Sub-agent loop: classifier issues bounded bi-encoder queries to PRIMAL
+    to ground its judgement, then returns (deal_type, confidence).
+
+    No side effects: retrieved chunks live only in this function's local
+    variables. Nothing leaks into state, messages, or `retrieved_norms` —
+    consistent with the user's spec that RAG-assist must be invisible to the
+    rest of the pipeline.
+    """
+    max_queries = max(1, int(settings.classify_rag_assist_max_queries))
+    top_k = max(1, int(settings.classify_rag_assist_top_k_per_query))
+    LOGGER.info(
+        "classify_rag_assist start max_queries=%s top_k=%s fallback_type=%r",
+        max_queries,
+        top_k,
+        fallback_deal_type,
+    )
+
+    queries_history: list[dict[str, str]] = []  # [{"query": ..., "summary": ...}]
+
+    for attempt in range(1, max_queries + 1):
+        history_block = (
+            "\n\n".join(
+                f"### Запрос #{i}: {entry['query']}\n{entry['summary']}"
+                for i, entry in enumerate(queries_history, 1)
+            )
+            or "(пока запросов не было)"
+        )
+        human_prompt = (
+            f"{SECTION_LABEL_DEAL_DESCRIPTION}\n{description}\n\n"
+            f"Уже выполненные запросы и краткая выдача:\n{history_block}\n\n"
+            f"Текущая попытка: {attempt} из {max_queries}."
+        )
+        result = _invoke_json(
+            f"classify_rag_assist_{attempt}",
+            build_classify_rag_assist_prompt(),
+            human_prompt,
+            fallback={"finished": True, "deal_type": fallback_deal_type, "confidence": "low"},
+        )
+        if not isinstance(result, dict):
+            break
+
+        if bool(result.get("finished")):
+            deal_type = _resolve_deal_type(result.get("deal_type"))
+            confidence = str(result.get("confidence", "medium")).lower()
+            if confidence not in {"low", "medium", "high"}:
+                confidence = "medium"
+            LOGGER.info(
+                "classify_rag_assist finished attempts=%s deal_type=%r confidence=%s reason=%r",
+                attempt,
+                deal_type,
+                confidence,
+                result.get("reason"),
+            )
+            return deal_type, confidence
+
+        next_query = (result.get("next_query") or "").strip() if isinstance(result.get("next_query"), str) else ""
+        if not next_query or any(entry["query"] == next_query for entry in queries_history):
+            LOGGER.info("classify_rag_assist degenerate next_query=%r — stopping", next_query)
+            break
+
+        # Bi-encoder only — no rerank, no expansion, no side effects.
+        chunks = search_primal_bi_encoder(query=next_query, source_filter=None, top_k=top_k)
+        summary = _summarize_chunks_for_classifier(chunks)
+        queries_history.append({"query": next_query, "summary": summary})
+        LOGGER.info(
+            "classify_rag_assist attempt=%s query=%r chunks=%s reason=%r",
+            attempt,
+            next_query,
+            len(chunks),
+            result.get("reason"),
+        )
+
+    LOGGER.info("classify_rag_assist exhausted without finalising — keeping fallback")
+    return _resolve_deal_type(fallback_deal_type), "low"
 
 
 def classify_deal(state: ContractAgentState) -> dict:
@@ -579,13 +913,33 @@ def classify_deal(state: ContractAgentState) -> dict:
         ),
         fallback=fallback,
     )
-    deal_type = result.get("deal_type")
-    if deal_type not in get_supported_deal_types():
-        deal_type = None
+    deal_type = _resolve_deal_type(result.get("deal_type"))
 
     confidence = str(result.get("confidence", "low")).lower()
     if confidence not in {"low", "medium", "high"}:
         confidence = "low"
+
+    # RAG-assist on low/medium confidence; result accepted only on high or when primary returned None.
+    if settings.classify_rag_assist_enabled and confidence != "high":
+        refined_type, refined_conf = _classify_with_rag_assist(description, deal_type)
+        if refined_conf == "high" or (refined_type is not None and deal_type is None):
+            LOGGER.info(
+                "classify_deal: RAG-assist refined type=%r → %r confidence=%s → %s",
+                deal_type,
+                refined_type,
+                confidence,
+                refined_conf,
+            )
+            deal_type = refined_type
+            confidence = refined_conf
+            # Подавим clarification: модель уже ответила за пользователя.
+            result = {
+                **result,
+                "deal_type": refined_type,
+                "confidence": refined_conf,
+                "clarification_needed": False,
+                "clarification_question": None,
+            }
 
     clarification_question = result.get("clarification_question")
     wants_clarification = bool(result.get("clarification_needed", False))
@@ -649,13 +1003,7 @@ def inform_unsupported_deal(state: ContractAgentState) -> dict:
         ),
         fallback=fallback,
     )
-    # NOTE: result_saved stays False — we did not actually produce any
-    # artifact. The next user message must go through the full regenerate
-    # path (classify_deal etc.) so re-described deals get a real chance.
-
-    # Sync sidebar status: surface "Требует внимания" so the user can tell
-    # something didn't go through. A subsequent successful run will reset
-    # the status to COMPLETED via save_result.
+    # result_saved intentionally left False so the next user message reruns the full pipeline.
     case_id = state.get("case_id")
     if case_id:
         try:
@@ -719,9 +1067,6 @@ def inform_user(state: ContractAgentState) -> dict:
         fallback=fallback,
     )
 
-    # Sync sidebar status: surface "Требует внимания" so the user sees that
-    # the run terminated due to general-norms issues. A later successful run
-    # will reset the status via save_result.
     case_id = state.get("case_id")
     if case_id:
         try:
@@ -732,25 +1077,498 @@ def inform_user(state: ContractAgentState) -> dict:
     return {**_state_messages_update(message), "processing_stage": STAGE_DEFAULT}
 
 
+def _format_chunk_for_filter(chunk: dict, text_limit: int) -> str:
+    chunk_id = chunk.get("chunk_id") or "(no-id)"
+    source = chunk.get("source") or "-"
+    article = chunk.get("article") or "-"
+    text = (chunk.get("text") or "").strip()
+    if len(text) > text_limit:
+        text = text[:text_limit].rstrip() + "..."
+    return f"chunk_id: {chunk_id}\nИсточник: {source}; Статья: {article}\n{text}"
+
+
+def _filter_one_batch(
+    batch_chunks: list[dict],
+    deal_type: str | None,
+    deal_description: str,
+    kind_suffix: str = "",
+) -> set[str]:
+    """Run one LLM filter call over a batch of chunks. Returns the SET of
+    chunk_id strings the model voted to keep.
+
+    Conservative on failure: any flaky response (non-list, empty list,
+    hallucinated ids) falls back to "keep the entire batch". This keeps the
+    overall pipeline's recall stable — the filter can only HELP precision,
+    never destroy recall.
+    """
+    all_ids = {str(c["chunk_id"]) for c in batch_chunks if c.get("chunk_id")}
+    if not all_ids:
+        return all_ids
+
+    text_limit = max(100, int(settings.retrieval_filter_text_preview_chars))
+    chunks_block = "\n\n---\n\n".join(_format_chunk_for_filter(c, text_limit) for c in batch_chunks)
+    fallback = {"relevant_chunk_ids": list(all_ids)}
+
+    result = _invoke_json(
+        f"filter_retrieved_norms{kind_suffix}",
+        FILTER_RETRIEVED_NORMS_PROMPT,
+        (
+            f"{SECTION_LABEL_DEAL_TYPE} {deal_type or '-'}\n\n"
+            f"{SECTION_LABEL_DEAL_DESCRIPTION}\n{deal_description}\n\n"
+            f"Найденные выдержки:\n{chunks_block}"
+        ),
+        fallback=fallback,
+    )
+    keep_ids_raw = result.get("relevant_chunk_ids") if isinstance(result, dict) else None
+    if not isinstance(keep_ids_raw, list):
+        LOGGER.warning("Filter LLM returned non-list relevant_chunk_ids; keeping batch as-is")
+        return all_ids
+
+    keep_ids = {str(item) for item in keep_ids_raw if isinstance(item, (str, int, float)) and str(item).strip()}
+    if not keep_ids:
+        LOGGER.warning("Filter LLM returned empty relevant_chunk_ids; keeping batch as-is")
+        return all_ids
+
+    valid = keep_ids & all_ids
+    if not valid:
+        LOGGER.warning(
+            "Filter LLM returned ids that don't match this batch (sent=%s, got=%s); keeping batch",
+            len(all_ids),
+            len(keep_ids),
+        )
+        return all_ids
+    return valid
+
+
+def _filter_relevant_chunks(
+    chunks: list[dict],
+    deal_type: str | None,
+    deal_description: str,
+) -> list[dict]:
+    """LLM filter pass over retrieve_specific output.
+
+    Asks the model which `chunk_id`s actually relate to the deal and keeps
+    only those. Conservative by design — the prompt instructs the model to
+    drop only clearly-irrelevant chunks. When the chunk count exceeds
+    `settings.retrieval_filter_batch_size` (and that value is > 0), the
+    filter is split into batches and the union of kept ids is taken; this
+    avoids "lost in the middle" degradation on large top_k. Multiple
+    fail-safes guarantee we never wipe the entire context on a flaky LLM
+    response (see `_filter_one_batch`).
+    """
+    if not chunks or not settings.retrieval_filter_enabled:
+        return chunks
+    # No stable chunk_id means we can't map model output back — skip rather than guess.
+    chunks_with_id = [c for c in chunks if c.get("chunk_id")]
+    if not chunks_with_id:
+        LOGGER.info("Filter skipped: no chunk_id on incoming chunks (legacy index?)")
+        return chunks
+
+    batch_size = int(settings.retrieval_filter_batch_size or 0)
+    if batch_size <= 0 or len(chunks_with_id) <= batch_size:
+        kept_ids = _filter_one_batch(chunks_with_id, deal_type, deal_description)
+    else:
+        kept_ids = set()
+        n_batches = (len(chunks_with_id) + batch_size - 1) // batch_size
+        LOGGER.info(
+            "Filter batched: chunks=%s batch_size=%s batches=%s",
+            len(chunks_with_id),
+            batch_size,
+            n_batches,
+        )
+        for batch_idx in range(n_batches):
+            batch = chunks_with_id[batch_idx * batch_size : (batch_idx + 1) * batch_size]
+            batch_kept = _filter_one_batch(
+                batch, deal_type, deal_description, kind_suffix=f"_batch_{batch_idx + 1}"
+            )
+            LOGGER.info(
+                "Filter batch %s/%s: input=%s kept=%s",
+                batch_idx + 1,
+                n_batches,
+                len(batch),
+                len(batch_kept),
+            )
+            kept_ids |= batch_kept
+
+    if not kept_ids:
+        # Safety net against accidental full-context wipe.
+        LOGGER.warning("Filter dropped everything across batches; keeping all chunks (safety net)")
+        return chunks
+
+    filtered = [c for c in chunks if str(c.get("chunk_id") or "") in kept_ids]
+    if not filtered:
+        LOGGER.warning(
+            "Filter kept_ids don't match any returned chunk (got=%s); keeping all",
+            len(kept_ids),
+        )
+        return chunks
+
+    dropped = len(chunks) - len(filtered)
+    LOGGER.info(
+        "Filter pass: kept=%s dropped=%s (of %s) deal_type=%r",
+        len(filtered),
+        dropped,
+        len(chunks),
+        deal_type,
+    )
+    return filtered
+
+
+def _chunk_unique_key(chunk: dict) -> tuple[str, str, str]:
+    """Stable identity for a chunk regardless of which retrieval path produced
+    it. Used to dedup across iterative-loop iterations and across the
+    PRIMAL/SECONDARY merge in the iterative flow."""
+    chunk_id = (chunk.get("chunk_id") or "").strip()
+    if chunk_id:
+        return ("id", chunk_id, "")
+    return ("sa", str(chunk.get("source") or ""), str(chunk.get("article") or ""))
+
+
+def _summarize_approved_chunks(chunks: list[dict], text_chars: int = 180) -> str:
+    """Short, planner-readable summary of approved norms. Keeps the planner
+    prompt bounded — for 20 chunks at 180 chars + headers this is ~4 KB."""
+    if not chunks:
+        return "(пока ничего не одобрено)"
+    parts = []
+    for chunk in chunks:
+        source = chunk.get("source", "-")
+        article = chunk.get("article", "-")
+        text = (chunk.get("text") or "").strip().replace("\n", " ")
+        if len(text) > text_chars:
+            text = text[:text_chars].rstrip() + "..."
+        parts.append(f"- {source}, {article}: {text}")
+    return "\n".join(parts)
+
+
+def _plan_next_iterative_query(
+    deal_type: str | None,
+    deal_description: str,
+    approved: list[dict],
+    history: list[str],
+    attempt_idx: int,
+) -> tuple[bool, str | None]:
+    """Ask the LLM to either propose the next query or signal done.
+
+    Returns (finished, next_query). Defensive on bad output: any malformed
+    response is treated as `finished=True` so we don't loop on nothing.
+    """
+    history_block = "\n".join(f"- {q}" for q in history) if history else "(пока не было запросов)"
+    summary = _summarize_approved_chunks(approved)
+    result = _invoke_json(
+        f"iterative_planner_{attempt_idx}",
+        ITERATIVE_RETRIEVAL_PLANNER_PROMPT,
+        (
+            f"{SECTION_LABEL_DEAL_TYPE} {deal_type or '-'}\n\n"
+            f"{SECTION_LABEL_DEAL_DESCRIPTION}\n{deal_description}\n\n"
+            f"Уже одобренные нормы (всего {len(approved)}):\n{summary}\n\n"
+            f"Уже использованные формулировки запроса:\n{history_block}"
+        ),
+        fallback={"finished": True, "reason": "planner LLM unavailable"},
+    )
+    if not isinstance(result, dict):
+        return True, None
+    if bool(result.get("finished")):
+        return True, None
+    next_query = result.get("next_query")
+    if not isinstance(next_query, str) or not next_query.strip():
+        return True, None
+    return False, next_query.strip()
+
+
+def _judge_relevance_strict(
+    candidates: list[dict],
+    deal_type: str | None,
+    deal_description: str,
+    attempt_idx: int,
+) -> set[str]:
+    """Strict-judge LLM call: returns the set of chunk_ids the model
+    explicitly approved as definitely-relevant.
+
+    Unlike `_filter_one_batch` (conservative — keep on doubt), this judge
+    drops on doubt. Used inside the iterative loop to keep accumulated set
+    clean. Falls back to empty set on failure (next loop iteration tries a
+    different query); the loop's hard cap prevents infinite work.
+    """
+    chunks_with_id = [c for c in candidates if c.get("chunk_id")]
+    if not chunks_with_id:
+        return set()
+    text_limit = max(100, int(settings.retrieval_filter_text_preview_chars))
+    chunks_block = "\n\n---\n\n".join(_format_chunk_for_filter(c, text_limit) for c in chunks_with_id)
+    result = _invoke_json(
+        f"iterative_judge_{attempt_idx}",
+        ITERATIVE_RELEVANCE_JUDGE_PROMPT,
+        (
+            f"{SECTION_LABEL_DEAL_TYPE} {deal_type or '-'}\n\n"
+            f"{SECTION_LABEL_DEAL_DESCRIPTION}\n{deal_description}\n\n"
+            f"Найденные выдержки:\n{chunks_block}"
+        ),
+        fallback={"relevant_chunk_ids": []},  # strict: empty on failure
+    )
+    keep_ids_raw = result.get("relevant_chunk_ids") if isinstance(result, dict) else None
+    if not isinstance(keep_ids_raw, list):
+        return set()
+    all_ids = {str(c["chunk_id"]) for c in chunks_with_id}
+    keep_ids = {str(item) for item in keep_ids_raw if isinstance(item, (str, int, float)) and str(item).strip()}
+    return keep_ids & all_ids
+
+
+def _expand_references_for_chunks(chunks: list[dict]) -> list[dict]:
+    """For each approved chunk, fetch its `references` from SECONDARY.
+    Returns only NEW chunks not already in the input (deduped)."""
+    seen = {_chunk_unique_key(c) for c in chunks}
+    collected: list[dict] = []
+    for chunk in chunks:
+        for reference in chunk.get("references") or []:
+            source, article_number = parse_reference(reference)
+            if not source:
+                continue
+            for payload in fetch_reference_chunks_by_payload(source, article_number):
+                key = _chunk_unique_key(payload)
+                if key in seen:
+                    continue
+                seen.add(key)
+                payload.setdefault("score", None)
+                collected.append(payload)
+    return collected
+
+
+def _enrich_norms_with_vague_refs(
+    chunks: list[dict],
+    deal_type: str | None,
+    deal_description: str,
+) -> list[dict]:
+    """Detect vague references in the retrieved norms and pull resolving
+    chunks from SECONDARY. Returns only the new chunks (deduped vs input).
+
+    Mirrors the `enrich_recommendations` pattern but the output is chunks
+    to add to the retrieved set rather than text woven into a narrative.
+    """
+    if not chunks:
+        return []
+    text_limit = max(200, int(settings.retrieval_filter_text_preview_chars))
+    norms_block = _norms_to_context(chunks, limit=len(chunks), text_limit=text_limit)
+    detection = _invoke_json(
+        "detect_vague_refs_in_norms",
+        DETECT_VAGUE_REFERENCES_IN_NORMS_PROMPT,
+        f"{SECTION_LABEL_DEAL_TYPE} {deal_type or '-'}\n\n"
+        f"{SECTION_LABEL_DEAL_DESCRIPTION}\n{deal_description}\n\n"
+        f"Найденные нормы:\n{norms_block}",
+        fallback={"items": []},
+    )
+    items = detection.get("items") if isinstance(detection, dict) else []
+    if not isinstance(items, list) or not items:
+        return []
+    max_items = max(0, int(settings.retrieval_iterative_vague_enrichment_max_items))
+    items = items[:max_items]
+
+    seen = {_chunk_unique_key(c) for c in chunks}
+    new_chunks: list[dict] = []
+    for idx, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            continue
+        query = (item.get("search_query") or "").strip()
+        if not query:
+            continue
+        candidates = retrieve_secondary(query, top_k=settings.retrieval_secondary_enrichment_top_k)
+        LOGGER.info(
+            "Iterative vague-ref enrichment[%s]: vague=%r query=%r chunks=%s",
+            idx,
+            (item.get("vague_reference") or "")[:80],
+            query,
+            len(candidates),
+        )
+        for payload in candidates:
+            key = _chunk_unique_key(payload)
+            if key in seen:
+                continue
+            seen.add(key)
+            payload.setdefault("score", None)
+            new_chunks.append(payload)
+    return new_chunks
+
+
+def _retrieve_specific_iterative(state: ContractAgentState) -> list[dict]:
+    """Sub-agent-driven retrieval pipeline (opt-in via
+    `settings.retrieval_iterative_enabled`).
+
+    Phases:
+      1. Iterative loop — planner LLM proposes queries, bi-encoder pulls
+         candidates, strict-judge LLM approves the ones definitely relevant.
+         Stops at TARGET_ARTICLES approved or MAX_QUERIES attempts.
+      2. Reference expansion — for each approved chunk, fetch its references
+         (SECONDARY) by exact (source, article) lookup.
+      3. Joint rerank — cross-encoder ranks the union and trims to
+         `retrieval_specific_expanded_top_k`.
+      4. Vague-reference enrichment — detect non-specific citations in the
+         union's text, search SECONDARY semantically for each, add resolving
+         chunks.
+    No final LLM filter — the strict-judge in phase 1 already enforces
+    relevance, and phase 4 only adds chunks the planner+detector deemed
+    worth chasing.
+    """
+    deal_type = state.get("deal_type")
+    deal_description = state.get("deal_description", "")
+    initial_query = (state.get("retrieval_query") or _build_retrieval_query(state)).strip()
+    source_filter = _source_filter_for_deal(deal_type, deal_description)
+
+    target_articles = max(1, int(settings.retrieval_iterative_target_articles))
+    max_queries = max(1, int(settings.retrieval_iterative_max_queries))
+    top_k_per_query = max(1, int(settings.retrieval_iterative_top_k_per_query))
+
+    approved: list[dict] = []
+    approved_keys: set[tuple[str, str, str]] = set()
+    seen_candidate_keys: set[tuple[str, str, str]] = set()
+    query_history: list[str] = []
+    current_query: str | None = initial_query
+
+    LOGGER.info(
+        "Iterative retrieval start: target_articles=%s max_queries=%s top_k_per_query=%s source_filter=%s",
+        target_articles,
+        max_queries,
+        top_k_per_query,
+        source_filter,
+    )
+
+    for attempt in range(1, max_queries + 1):
+        if len(approved) >= target_articles:
+            LOGGER.info("Iterative retrieval reached target_articles=%s, stopping", target_articles)
+            break
+        if not current_query:
+            LOGGER.info("Iterative retrieval: no current query to run, stopping")
+            break
+        if current_query in query_history:
+            LOGGER.info("Iterative retrieval: planner suggested duplicate query %r, stopping", current_query)
+            break
+
+        # Phase 1a: bi-encoder search.
+        candidates = search_primal_bi_encoder(
+            query=current_query, source_filter=source_filter, top_k=top_k_per_query
+        )
+        fresh = []
+        for c in candidates:
+            key = _chunk_unique_key(c)
+            if key in seen_candidate_keys or key in approved_keys:
+                continue
+            seen_candidate_keys.add(key)
+            fresh.append(c)
+        LOGGER.info(
+            "Iterative attempt %s/%s query=%r candidates=%s fresh=%s",
+            attempt,
+            max_queries,
+            current_query,
+            len(candidates),
+            len(fresh),
+        )
+        query_history.append(current_query)
+
+        if fresh:
+            # Phase 1b: strict-judge.
+            kept_ids = _judge_relevance_strict(fresh, deal_type, deal_description, attempt)
+            for c in fresh:
+                if str(c.get("chunk_id") or "") in kept_ids:
+                    key = _chunk_unique_key(c)
+                    if key in approved_keys:
+                        continue
+                    approved.append(c)
+                    approved_keys.add(key)
+            LOGGER.info(
+                "Iterative attempt %s judged kept=%s (approved so far=%s/%s)",
+                attempt,
+                len(kept_ids),
+                len(approved),
+                target_articles,
+            )
+
+        if len(approved) >= target_articles:
+            break
+
+        # Phase 1c: plan next query.
+        finished, next_q = _plan_next_iterative_query(
+            deal_type, deal_description, approved, query_history, attempt + 1
+        )
+        if finished or not next_q:
+            LOGGER.info("Iterative retrieval planner finished after %s attempts", attempt)
+            break
+        current_query = next_q
+
+    # Cap to target — judge may approve more on a single batch when N > 1.
+    if len(approved) > target_articles:
+        approved = approved[:target_articles]
+
+    LOGGER.info("Iterative phase 1 done: approved=%s queries_used=%s", len(approved), len(query_history))
+    if not approved:
+        return []
+
+    # Phase 2: reference expansion.
+    expanded = _expand_references_for_chunks(approved)
+    LOGGER.info("Iterative phase 2 (references): added=%s", len(expanded))
+
+    # Phase 3: joint rerank.
+    union = list(approved) + expanded
+    final_top_k = max(target_articles, int(settings.retrieval_specific_expanded_top_k))
+    reranked = rerank_chunks(initial_query, union, final_top_k)
+    LOGGER.info("Iterative phase 3 (rerank): union=%s reranked=%s", len(union), len(reranked))
+
+    # Phase 4: vague-reference enrichment.
+    enrichment = _enrich_norms_with_vague_refs(reranked, deal_type, deal_description)
+    if enrichment:
+        LOGGER.info("Iterative phase 4 (vague-ref enrichment): added=%s", len(enrichment))
+    final_norms = reranked + enrichment
+
+    LOGGER.info(
+        "Iterative retrieval done: final=%s (approved=%s + refs=%s after rerank + enrichment=%s)",
+        len(final_norms),
+        len(approved),
+        len(expanded),
+        len(enrichment),
+    )
+    return final_norms
+
+
 def retrieve_norms(state: ContractAgentState) -> dict:
+    # Captures node-only latency for eval harness, independent of classify/check_general_norms.
+    started = time.monotonic()
+
     deal_type = state.get("deal_type")
     description = state.get("deal_description", "")
     retrieval_query = (state.get("retrieval_query") or _build_retrieval_query(state)).strip()
-    source_filter = _source_filter_for_deal(deal_type, description)
-    LOGGER.info(
-        "Retriever request\nretrieval_query=%s\nsource_filter=%s\ntop_k=%s",
-        retrieval_query,
-        source_filter,
-        DEFAULT_TOP_K,
-    )
-    norms = retrieve_specific(
-        query=retrieval_query,
-        source_filter=source_filter,
-        top_k=DEFAULT_TOP_K,
-        candidate_top_k=settings.retrieval_candidate_top_k,
-    )
-    LOGGER.info("Retriever response\nchunks=%s\nsources=%s", len(norms), [item.get("source") for item in norms[:10]])
-    return {"retrieved_norms": norms, "processing_stage": STAGE_ANALYZE_NORMS}
+
+    if settings.retrieval_iterative_enabled:
+        norms = _retrieve_specific_iterative(state)
+        LOGGER.info(
+            "Iterative retriever response\nchunks=%s\nsources=%s",
+            len(norms),
+            [item.get("source") for item in norms[:10]],
+        )
+    else:
+        # Classic path: semantic search → reference expansion → joint rerank → LLM filter.
+        source_filter = _source_filter_for_deal(deal_type, description)
+        LOGGER.info(
+            "Retriever request\nretrieval_query=%s\nsource_filter=%s\ntop_k=%s",
+            retrieval_query,
+            source_filter,
+            DEFAULT_TOP_K,
+        )
+        norms = retrieve_specific(
+            query=retrieval_query,
+            source_filter=source_filter,
+            top_k=DEFAULT_TOP_K,
+            candidate_top_k=settings.retrieval_candidate_top_k,
+        )
+        LOGGER.info(
+            "Retriever response\nchunks=%s\nsources=%s",
+            len(norms),
+            [item.get("source") for item in norms[:10]],
+        )
+        norms = _filter_relevant_chunks(norms, deal_type=deal_type, deal_description=description)
+
+    elapsed_ms = (time.monotonic() - started) * 1000.0
+    LOGGER.info("retrieve_norms latency=%.1f ms chunks=%s", elapsed_ms, len(norms))
+    return {
+        "retrieved_norms": norms,
+        "retrieve_norms_latency_ms": elapsed_ms,
+        "processing_stage": STAGE_ANALYZE_NORMS,
+    }
 
 
 def check_data_sufficiency(state: ContractAgentState) -> dict:
@@ -789,9 +1607,6 @@ def check_data_sufficiency(state: ContractAgentState) -> dict:
         "clarification_stage": "data_sufficiency" if not sufficient else None,
         "missing_fields": missing_fields,
         "deal_structure": result.get("deal_structure") or state.get("deal_structure") or {},
-        # Sufficient data → next stage in the pipeline is generate_contract
-        # (data sufficiency now sits right before it). Pause on clarification
-        # gets the default "talking with user" stage.
         "processing_stage": STAGE_DEFAULT if not sufficient else STAGE_GENERATE_CONTRACT,
     }
 
@@ -820,10 +1635,7 @@ def check_written_form(state: ContractAgentState) -> dict:
         "written_form_reason": result.get("reason"),
         "processing_stage": STAGE_GENERATE_CONTRACT if requires_written_form else STAGE_DEFAULT,
     }
-    # Honour per-user preferences. `always_ask` is the legacy default — only
-    # then do we surface a clarification when the law doesn't require a
-    # written contract. `legal_only` and `always` skip the question entirely
-    # (the router below picks the appropriate next branch).
+    # always_ask is the only policy that surfaces a clarification when the law doesn't require it.
     policy = state.get("contract_generation_policy") or "always_ask"
     if not requires_written_form and policy == "always_ask":
         reason = result.get("reason") or "по найденным нормам письменная форма не является обязательной"
@@ -955,10 +1767,7 @@ def enrich_recommendations(state: ContractAgentState) -> dict:
         integrated = recommendations
     LOGGER.info("enrich_recommendations: integrated %d enrichments", len(enrichments))
     update: dict = {"recommendations": integrated, "processing_stage": STAGE_DEFAULT}
-    # When integration produced a usable response, treat it as the final
-    # recommendations exchange — it supersedes the generate_recommendations
-    # one. If integration failed (empty exchange / fallback), keep whatever
-    # generate_recommendations stashed.
+    # Successful integration supersedes generate_recommendations' exchange.
     if integrate_exchange:
         update["final_recommendations_exchange"] = integrate_exchange
     return update
@@ -1104,9 +1913,7 @@ def save_result(state: ContractAgentState) -> dict:
     except Exception as exc:
         LOGGER.warning("Failed to update case status: %s", exc)
 
-    # Dump the FINAL post-validation LLM exchanges to per-(model, deal_type)
-    # text files when enabled. We only do this on COMPLETED runs so failed /
-    # validation-exhausted attempts don't pollute the artifacts.
+    # Dump only on COMPLETED runs to avoid polluting artifacts with failed/exhausted attempts.
     if status == CaseStatus.COMPLETED.value and settings.llm_dump_final_enabled:
         deal_type = state.get("deal_type")
         contract_exchange = state.get("final_contract_exchange") or {}

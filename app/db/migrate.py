@@ -197,14 +197,29 @@ CREATE TABLE IF NOT EXISTS user_preferences (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Theme preference per user / per DB-admin. Owner is auth-only via env vars
+-- and stores theme in the session cookie, no DB row needed.
+-- NULL = "no explicit preference" → frontend falls back to prefers-color-scheme.
+-- The earlier version of this migration created the column with
+-- NOT NULL DEFAULT 'dark'; we relax both so a row predating an explicit
+-- toggle can signal "none" instead of pinning everyone to dark.
+ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS theme TEXT;
+ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS theme TEXT;
+ALTER TABLE user_preferences ALTER COLUMN theme DROP NOT NULL;
+ALTER TABLE user_preferences ALTER COLUMN theme DROP DEFAULT;
+ALTER TABLE admin_users ALTER COLUMN theme DROP NOT NULL;
+ALTER TABLE admin_users ALTER COLUMN theme DROP DEFAULT;
+-- Reset rows that hold the legacy server-default — they came from migration,
+-- not from a user/admin actually choosing "dark". After this, "dark" / "light"
+-- only appear when explicitly set via API.
+UPDATE user_preferences SET theme = NULL WHERE theme = 'dark';
+UPDATE admin_users SET theme = NULL WHERE theme = 'dark';
+
 -- On startup we also clean orphan PROCESSING rows from a previous app crash.
 -- That cleanup runs separately so legacy DONE rows are not touched here.
 """
 
-# Default catalog of subscription plans. INSERT ... ON CONFLICT DO NOTHING
-# means re-running on a populated DB does not overwrite admin-edited prices.
-# Adjust price/limits via the admin UI; new defaults here only apply on a
-# pristine DB.
+# Default catalog. ON CONFLICT DO NOTHING — re-runs do not overwrite admin-edited prices.
 _DEFAULT_PLANS: tuple[dict, ...] = (
     {
         "code": "free",
@@ -256,8 +271,7 @@ def run_migrations(engine: Engine, seed_admin_email: str, owner_username: str = 
     with engine.begin() as conn:
         conn.execute(text(_MIGRATION_SQL))
 
-        # Remove the owner from admin_users (previously seeded via ADMIN_USERNAME).
-        # The owner no longer has a DB row — auth is done against env vars only.
+        # Owner auth is now env-var based; clean up legacy admin_users row if present.
         if owner_username:
             result = conn.execute(
                 text("DELETE FROM admin_users WHERE username = :u"),

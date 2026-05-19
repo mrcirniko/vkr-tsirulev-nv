@@ -65,8 +65,7 @@ def delete_objects(keys: Iterable[str]) -> None:
     if not keys_list:
         return
     client = _client()
-    # S3 DeleteObjects accepts up to 1000 keys per request — for our scale (a
-    # handful of NPA files per row) one batch is always enough.
+    # S3 DeleteObjects caps at 1000 keys per request — one batch is always enough at our scale.
     client.delete_objects(
         Bucket=settings.admin_npa_bucket,
         Delete={"Objects": [{"Key": k} for k in keys_list], "Quiet": True},

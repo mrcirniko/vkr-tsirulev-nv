@@ -61,13 +61,6 @@ def case_belongs_to_owner(case_id: str | UUID, owner_id: str | UUID) -> bool:
     return case.user_id == UUID(str(owner_id))
 
 
-# def list_cases() -> list[Case]:
-#     # UNUSED — superseded by list_cases_for_owner; kept here for reference.
-#     with SessionLocal() as session:
-#         stmt = select(Case).order_by(Case.updated_at.desc(), Case.created_at.desc())
-#         return list(session.scalars(stmt).all())
-
-
 def list_cases_for_owner(owner_id: str | UUID) -> list[Case]:
     owner_uuid = UUID(str(owner_id))
     with SessionLocal() as session:
@@ -254,12 +247,6 @@ def get_user(user_id: str | UUID) -> User | None:
         return session.get(User, UUID(str(user_id)))
 
 
-# def get_user_by_email(email: str) -> User | None:
-#     # UNUSED — kept for reference; lookup happens inline inside upsert_user_by_google.
-#     with SessionLocal() as session:
-#         return session.scalars(select(User).where(User.email == email)).first()
-
-
 def upsert_user_by_google(
     google_id: str,
     email: str,
@@ -314,10 +301,12 @@ def upsert_user_by_yandex(
 
 
 def _default_prefs(user_id: UUID) -> dict:
+    # theme=None means "no explicit choice" — frontend falls back to prefers-color-scheme.
     return {
         "user_id": user_id,
         "contract_generation_policy": CONTRACT_POLICY_LEGAL_ONLY,
         "ask_personal_data": True,
+        "theme": None,
     }
 
 
@@ -332,6 +321,7 @@ def get_user_preferences(user_id: str | UUID) -> dict:
             "user_id": row.user_id,
             "contract_generation_policy": row.contract_generation_policy,
             "ask_personal_data": row.ask_personal_data,
+            "theme": row.theme,
         }
 
 
@@ -340,6 +330,7 @@ def upsert_user_preferences(
     *,
     contract_generation_policy: str | None = None,
     ask_personal_data: bool | None = None,
+    theme: str | None = None,
 ) -> dict:
     """Insert-or-update the prefs row; returns the freshly persisted values.
 
@@ -349,13 +340,19 @@ def upsert_user_preferences(
     user_uuid = UUID(str(user_id))
     if contract_generation_policy is not None and contract_generation_policy not in ALLOWED_CONTRACT_POLICIES:
         raise ValueError(f"contract_generation_policy must be one of {ALLOWED_CONTRACT_POLICIES}")
+    from db.models import ALLOWED_THEMES
+
+    if theme is not None and theme not in ALLOWED_THEMES:
+        raise ValueError(f"theme must be one of {ALLOWED_THEMES}")
     with session_scope() as session:
         row = session.get(UserPreferences, user_uuid)
         if row is None:
+            # theme=None preserves the "no explicit preference" signal.
             row = UserPreferences(
                 user_id=user_uuid,
                 contract_generation_policy=contract_generation_policy or CONTRACT_POLICY_LEGAL_ONLY,
                 ask_personal_data=True if ask_personal_data is None else bool(ask_personal_data),
+                theme=theme,
             )
             session.add(row)
         else:
@@ -363,10 +360,45 @@ def upsert_user_preferences(
                 row.contract_generation_policy = contract_generation_policy
             if ask_personal_data is not None:
                 row.ask_personal_data = bool(ask_personal_data)
+            if theme is not None:
+                row.theme = theme
         session.flush()
         session.refresh(row)
         return {
             "user_id": row.user_id,
             "contract_generation_policy": row.contract_generation_policy,
             "ask_personal_data": row.ask_personal_data,
+            "theme": row.theme,
         }
+
+
+# ---- Admin theme ---------------------------------------------------------
+
+
+def get_admin_theme(admin_id: str | UUID) -> str | None:
+    """Return the stored theme for a DB admin (not owner). None means
+    "never set" — the frontend then falls back to prefers-color-scheme."""
+    from db.models import AdminUser
+
+    admin_uuid = UUID(str(admin_id))
+    with SessionLocal() as session:
+        row = session.get(AdminUser, admin_uuid)
+        if row is None:
+            return None
+        return row.theme or None
+
+
+def set_admin_theme(admin_id: str | UUID, theme: str) -> str:
+    """Persist theme for a DB admin. Returns the stored value."""
+    from db.models import ALLOWED_THEMES, AdminUser
+
+    if theme not in ALLOWED_THEMES:
+        raise ValueError(f"theme must be one of {ALLOWED_THEMES}")
+    admin_uuid = UUID(str(admin_id))
+    with session_scope() as session:
+        row = session.get(AdminUser, admin_uuid)
+        if row is None:
+            raise ValueError(f"Admin {admin_id} not found")
+        row.theme = theme
+        session.flush()
+        return row.theme

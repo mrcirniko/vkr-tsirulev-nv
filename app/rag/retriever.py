@@ -127,11 +127,95 @@ def _log_reranker_actual(model) -> None:
         LOGGER.debug("Failed to probe reranker device/dtype", exc_info=True)
 
 
+def _is_qwen3_reranker(model_id: str) -> bool:
+    """Detect Qwen3-Reranker by its HF model id. We can't load it via the
+    sentence-transformers CrossEncoder shim (CausalLM head, no score.weight),
+    so we route to the custom path defined below."""
+    return "qwen3-reranker" in (model_id or "").lower()
+
+
+class _Qwen3Reranker:
+    """Custom inference for Qwen3-Reranker following the "Using Transformers"
+    recipe from the model card. Mimics `CrossEncoder.predict(pairs, batch_size=...)`
+    so the rest of the retrieval pipeline doesn't care which backend is in use.
+
+    Scoring: each (query, doc) pair is wrapped in a chat-template prompt
+    that asks the model to answer "yes" or "no". We take the final-position
+    logits, compute log_softmax over [no, yes] and return P(yes) as the
+    relevance score (in [0, 1]).
+    """
+
+    _PREFIX = (
+        '<|im_start|>system\nJudge whether the Document meets the requirements '
+        'based on the Query and the Instruct provided. Note that the answer can '
+        'only be "yes" or "no".<|im_end|>\n<|im_start|>user\n'
+    )
+    _SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+
+    def __init__(self, model_id: str, device: str | None = None, dtype=None):
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        load_kwargs: dict = {}
+        if dtype is not None:
+            load_kwargs["torch_dtype"] = dtype
+        # Direct device load avoids transient CPU→GPU duplication that doubles peak RAM.
+        if device:
+            load_kwargs["device_map"] = device
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
+        self.model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs).eval()
+        if device and next(self.model.parameters()).device.type != device.split(":")[0]:
+            self.model = self.model.to(device)
+
+        self.token_yes_id = self.tokenizer.convert_tokens_to_ids("yes")
+        self.token_no_id = self.tokenizer.convert_tokens_to_ids("no")
+        self.prefix_tokens = self.tokenizer.encode(self._PREFIX, add_special_tokens=False)
+        self.suffix_tokens = self.tokenizer.encode(self._SUFFIX, add_special_tokens=False)
+        self.task = settings.reranker_task_instruction
+        self.max_length = max(512, int(settings.reranker_max_length))
+
+    def _format(self, query: str, doc: str) -> str:
+        return f"<Instruct>: {self.task}\n<Query>: {query}\n<Document>: {doc}"
+
+    def predict(self, pairs: list[list[str]] | list[tuple[str, str]], batch_size: int = 8, **_kwargs):
+        """Returns a list of float scores in the order of `pairs`. Signature
+        mirrors sentence-transformers CrossEncoder.predict so the existing
+        `_rerank()` call site works unchanged."""
+        import torch
+
+        if not pairs:
+            return []
+        scores: list[float] = []
+        budget = self.max_length - len(self.prefix_tokens) - len(self.suffix_tokens)
+        for start in range(0, len(pairs), max(1, batch_size)):
+            batch = pairs[start : start + batch_size]
+            prompts = [self._format(q, d) for q, d in batch]
+            inputs = self.tokenizer(
+                prompts,
+                padding=False,
+                truncation="longest_first",
+                return_attention_mask=False,
+                max_length=budget,
+            )
+            for i, ids in enumerate(inputs["input_ids"]):
+                inputs["input_ids"][i] = self.prefix_tokens + ids + self.suffix_tokens
+            inputs = self.tokenizer.pad(inputs, padding=True, return_tensors="pt")
+            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+
+            with torch.no_grad():
+                logits = self.model(**inputs).logits[:, -1, :]
+            yes_logits = logits[:, self.token_yes_id]
+            no_logits = logits[:, self.token_no_id]
+            stacked = torch.stack([no_logits, yes_logits], dim=1)
+            probs = torch.nn.functional.log_softmax(stacked, dim=1)
+            scores.extend(probs[:, 1].exp().cpu().tolist())
+        return scores
+
+
 @lru_cache(maxsize=1)
 def _reranker():
     if not settings.reranker_enabled:
         return None
-    from sentence_transformers import CrossEncoder
 
     requested_device = settings.reranker_device or None
     model_kwargs = _reranker_model_kwargs()
@@ -141,6 +225,21 @@ def _reranker():
         requested_device or "auto",
         settings.reranker_precision or "auto",
     )
+
+    # Qwen3-Reranker is a CausalLM; sentence-transformers CrossEncoder would attach a random
+    # score head and produce garbage. Route to a custom yes/no-logit path per the model card.
+    if _is_qwen3_reranker(settings.reranker_model):
+        try:
+            dtype = model_kwargs.get("torch_dtype") if model_kwargs else None
+            model = _Qwen3Reranker(settings.reranker_model, device=requested_device, dtype=dtype)
+            _log_reranker_actual(model)
+            return model
+        except Exception:
+            LOGGER.exception("Qwen3-Reranker load failed; disabling reranker for this session")
+            return None
+
+    from sentence_transformers import CrossEncoder
+
     try:
         kwargs: dict = {}
         if requested_device:
@@ -151,10 +250,7 @@ def _reranker():
         _log_reranker_actual(model)
         return model
     except Exception as exc:
-        # Common case: requested CUDA but the embedder already filled VRAM.
-        # Fall back to CPU rather than crashing the whole retrieval pipeline.
-        # Bf16/fp16 also keeps working on CPU (just slower than fp32 on most
-        # consumer x86), so we preserve the requested precision on fallback.
+        # CUDA OOM fallback to CPU — preserves precision (bf16/fp16 work on CPU too, just slower).
         message = str(exc).lower()
         if requested_device and ("cuda" in requested_device.lower() or "out of memory" in message):
             LOGGER.warning(
@@ -173,8 +269,7 @@ def _reranker():
 
 
 def _chunk_rerank_text(chunk: dict) -> str:
-    # Mirror the indexer's heading prefix so the cross-encoder sees the same
-    # "ГК РФ\nСтатья 549. ..." context that the bi-encoder was trained on.
+    # Mirror indexer's heading prefix so the cross-encoder sees the same context as the bi-encoder.
     heading_parts = [
         str(chunk.get(field) or "").strip() for field in ("source", "article") if str(chunk.get(field) or "").strip()
     ]
@@ -314,6 +409,38 @@ def _search_primal(query: str, source_filter: str | None = None, top_k: int = DE
     )
 
 
+def search_primal_bi_encoder(
+    query: str, source_filter: str | None = None, top_k: int = DEFAULT_TOP_K
+) -> list[dict]:
+    """Bi-encoder-only PRIMAL search — no reranker, no reference expansion.
+
+    Used by the iterative retrieval flow in agent/nodes.py: each loop
+    iteration wants raw similarity results to pass to the strict-judge LLM,
+    and final reranking happens once at the end (over the full accumulated
+    set, including reference-expanded SECONDARY chunks).
+    """
+    _prepare_embedding_memory()
+    try:
+        return _merge_points(_search_primal(query=query, source_filter=source_filter, top_k=top_k))
+    finally:
+        _release_embedding_memory()
+
+
+def fetch_reference_chunks_by_payload(source: str, article_number: str | None) -> list[dict]:
+    """Public alias for `_fetch_reference_chunks` — scrolls SECONDARY by
+    (source, article_number) without similarity. Exposed for the iterative
+    retrieval flow's reference-expansion step.
+    """
+    return _fetch_reference_chunks(source=source, article_number=article_number)
+
+
+def rerank_chunks(query: str, chunks: list[dict], top_k: int) -> list[dict]:
+    """Public alias for `_rerank` — cross-encoder pass over a list of chunks.
+    Used by the iterative retrieval flow's final rerank step over the
+    union (approved + reference-expanded)."""
+    return _rerank(query, chunks, top_k)
+
+
 def _fetch_reference_chunks_from_collection(
     collection_name: str, source: str, article_number: str | None
 ) -> list[dict]:
@@ -321,15 +448,10 @@ def _fetch_reference_chunks_from_collection(
     must = [FieldCondition(key="source", match=MatchValue(value=source))]
     if article_number:
         must.append(FieldCondition(key="article_number", match=MatchValue(value=article_number)))
-        # Long articles get split into multiple chunks by the chunker;
-        # `limit=1` would silently drop tail chunks. Use a generous bound so
-        # we get the whole article without abusing the index.
+        # Long articles split across chunks — pull all without abusing the index.
         limit = settings.retrieval_reference_article_chunk_cap
     else:
-        # Bare-source reference (LLM emitted just a name with no article, or
-        # `parse_reference` couldn't find a number): take a few representative
-        # chunks. SOURCE_EXPANSION_LIMIT is small on purpose — it's a hint,
-        # not a deep dive.
+        # Bare-source reference: representative sample, not a deep dive.
         limit = SOURCE_EXPANSION_LIMIT
 
     points, _ = client.scroll(
@@ -397,16 +519,10 @@ def retrieve_specific(
     search_top_k = candidate_top_k or max(settings.retrieval_candidate_top_k, top_k)
     try:
         primary_points = list(_search_primal(query=query, source_filter=source_filter, top_k=search_top_k))
-        if source_filter and settings.retrieval_soft_source_filter:
-            primary_points.extend(_search_primal(query=query, source_filter=None, top_k=search_top_k))
-
         primary = _merge_points(primary_points)
         ranked_primary = _rerank(query, primary, top_k)
 
-        # Reference-graph expansion. We walk `ranked_primary` references for
-        # up to `max_hops` hops, accumulating chunks not seen yet. Each hop
-        # uses the previous hop's results as seeds, so we get transitive
-        # citations (norm A → B → C). Per-hop cap keeps fan-out bounded.
+        # Reference-graph expansion: walk citations for up to max_hops, per-hop cap on fan-out.
         seen_keys: set[tuple[str, str, str, str]] = {_fallback_chunk_key(p) for p in ranked_primary}
         all_references: list[dict] = []
         seed = ranked_primary
@@ -423,8 +539,7 @@ def retrieve_specific(
             all_references.extend(hop_chunks)
             seed = hop_chunks
 
-        # Joint rerank: a highly relevant referenced statute can outrank a
-        # weak primary tail entry now that they're scored together.
+        # Joint rerank so a referenced statute can outrank a weak primary tail entry.
         union = list(ranked_primary) + all_references
         final_top_k = max(top_k, settings.retrieval_specific_expanded_top_k)
         ordered = _rerank(query, union, final_top_k)

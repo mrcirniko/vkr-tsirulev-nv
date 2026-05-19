@@ -15,8 +15,7 @@ if settings.google_client_id and settings.google_client_secret:
     )
 
 
-# Yandex OAuth is implemented manually in auth/routes.py (httpx) because
-# authlib's non-OIDC state handling conflicts with some Starlette proxy setups.
+# Yandex OAuth lives in auth/routes.py (hand-rolled httpx) — see comment there.
 
 
 def google_configured() -> bool:

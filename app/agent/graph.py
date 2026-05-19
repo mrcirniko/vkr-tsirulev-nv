@@ -2,9 +2,6 @@ from __future__ import annotations
 
 from config import settings
 
-# from functools import lru_cache  # only used by commented-out get_contract_agent
-# from pathlib import Path  # only used by commented-out save_graph_visualization
-# from typing import Any  # only used by commented-out local-invocation API below
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
@@ -33,16 +30,8 @@ def _route_after_general_norms(state: ContractAgentState) -> str:
     return "inform_user" if not state.get("general_check_passed", True) else "retrieve_norms"
 
 
-# `_route_after_data_sufficiency` and `_route_after_optional_contract_answer`
-# live in agent/routing.py so the unit tests don't have to load the full
-# LLM stack to exercise them.
-
-
 def _route_after_validation(state: ContractAgentState) -> str:
-    # In edit-mode runs we never loop back through generate_contract — the
-    # whole point is to apply a targeted user-driven edit and stop. Validation
-    # results are surfaced to the user via save_result; on persistent issues
-    # the user can ask again.
+    # Edit-mode runs skip the validation retry loop and go straight to save.
     if state.get("intent") == "edit":
         return "save_result"
     if state.get("contract_valid"):
@@ -54,11 +43,17 @@ def _route_after_validation(state: ContractAgentState) -> str:
     return "generate_recommendations"
 
 
+def _route_after_followup(state: ContractAgentState) -> str:
+    return "followup_subagent_search" if state.get("subagent_active") else END
+
+
+def _route_after_followup_subagent(state: ContractAgentState) -> str:
+    return "followup_subagent_search" if state.get("subagent_active") else END
+
+
 def _route_after_user_message(state: ContractAgentState) -> str:
     intent = state.get("intent")
     if intent == "edit" and not state.get("allow_edit", True):
-        # Free plan tried to edit a contract — gate_free_plan rewrites the
-        # last assistant message with a refusal and ends the run.
         return "gate_free_plan"
     if intent == "followup":
         return "followup_response"
@@ -73,6 +68,7 @@ def build_state_graph() -> StateGraph:
     graph.add_node("route_user_message", nodes.route_user_message)
     graph.add_node("gate_free_plan", nodes.gate_free_plan)
     graph.add_node("followup_response", nodes.followup_response)
+    graph.add_node("followup_subagent_search", nodes.followup_subagent_search)
     graph.add_node("load_general_norms", nodes.load_general_norms)
     graph.add_node("classify_deal", nodes.classify_deal)
     graph.add_node("inform_unsupported_deal", nodes.inform_unsupported_deal)
@@ -103,7 +99,22 @@ def build_state_graph() -> StateGraph:
         },
     )
     graph.add_edge("edit_contract", "validate_contract")
-    graph.add_edge("followup_response", END)
+    graph.add_conditional_edges(
+        "followup_response",
+        _route_after_followup,
+        {
+            "followup_subagent_search": "followup_subagent_search",
+            END: END,
+        },
+    )
+    graph.add_conditional_edges(
+        "followup_subagent_search",
+        _route_after_followup_subagent,
+        {
+            "followup_subagent_search": "followup_subagent_search",
+            END: END,
+        },
+    )
     graph.add_edge("gate_free_plan", END)
     graph.add_edge("load_general_norms", "classify_deal")
     graph.add_conditional_edges(

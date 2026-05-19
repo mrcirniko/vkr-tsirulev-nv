@@ -35,14 +35,18 @@ from rag.indexer import (
 
 LOGGER = logging.getLogger("app.admin.tasks")
 
-# Single global lock — only one indexing/chunking job runs at a time across
-# the whole app. Both jobs share the GPU and Ollama, so concurrency would
-# only fight for resources without speeding anything up.
+# Global lock — indexing and chunking share GPU/Ollama, so they're serialized.
 _JOB_LOCK = asyncio.Lock()
 
+# Latest progress event per npa_id; used by ADMIN_WS on reconnect to rebuild progressMap.
+_LIVE_PROGRESS: dict[str, dict[str, Any]] = {}
 
-# Map UI choice -> Qdrant collection. Imported lazily inside helpers so
-# tests can run without app config side effects on import.
+
+def snapshot_live_progress() -> list[dict[str, Any]]:
+    """Return a copy of in-flight progress events, one per active npa_id."""
+    return [dict(event) for event in _LIVE_PROGRESS.values()]
+
+
 def _collection_for_group(source_group: str) -> str:
     from config import settings
 
@@ -59,7 +63,33 @@ def _utcnow_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+_TERMINAL_STATUSES = {"indexed", "ready", "failed"}
+_IN_FLIGHT_STATUSES = {"indexing", "chunking"}
+
+
+def _track_for_snapshot(event_type: str, payload: dict[str, Any]) -> None:
+    """Maintain `_LIVE_PROGRESS` so reconnecting admin clients see in-flight
+    jobs immediately. Keeps the latest progress event per npa_id; clears on
+    terminal status. Status-only events (indexing/chunking/etc.) seed the
+    entry if no progress has arrived yet so the UI shows *something*."""
+    npa_id = payload.get("npa_id")
+    if not npa_id:
+        return
+    key = str(npa_id)
+    event = {"type": event_type, **payload}
+    if event_type == "admin_npa_progress":
+        _LIVE_PROGRESS[key] = event
+        return
+    if event_type == "admin_npa_status":
+        status = payload.get("status")
+        if status in _TERMINAL_STATUSES:
+            _LIVE_PROGRESS.pop(key, None)
+        elif status in _IN_FLIGHT_STATUSES and key not in _LIVE_PROGRESS:
+            _LIVE_PROGRESS[key] = event
+
+
 async def _emit(admin_id: str, event_type: str, **payload: Any) -> None:
+    _track_for_snapshot(event_type, payload)
     await emit_admin_event(admin_id, {"type": event_type, **payload})
 
 
@@ -128,6 +158,7 @@ async def run_indexing_job(
     npa_id: str,
     source_group: str,
     recreate_collection: bool,
+    delete_existing_for_source: bool = True,
 ) -> None:
     """Embed + upsert a single NPA into the chosen Qdrant collection.
 
@@ -180,8 +211,7 @@ async def run_indexing_job(
             loop = asyncio.get_running_loop()
 
             def _progress(done: int, total: int) -> None:
-                # Called from a worker thread — schedule the WS event back on
-                # the running loop without blocking.
+                # Worker-thread → main-loop hop for non-blocking WS emit.
                 asyncio.run_coroutine_threadsafe(
                     _emit(
                         admin_id,
@@ -194,13 +224,15 @@ async def run_indexing_job(
                     loop,
                 )
 
+            # Per-source delete is redundant when recreate_collection wipes everything.
+            effective_delete = False if recreate_collection else delete_existing_for_source
             inserted = await asyncio.to_thread(
                 index_chunks_for_source,
                 collection_name=collection,
                 chunks=chunks,
                 source_name=npa.source_name,
                 recreate_collection=recreate_collection,
-                delete_existing_for_source=not recreate_collection,
+                delete_existing_for_source=effective_delete,
                 progress_cb=_progress,
             )
 

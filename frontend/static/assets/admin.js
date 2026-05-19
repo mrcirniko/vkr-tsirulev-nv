@@ -26,10 +26,19 @@ const SOURCE_GROUP_LABELS = {
   secondary: "Дополнительные нормы",
 };
 
+function getSystemTheme() {
+  // Browser prefers-color-scheme: default when the admin hasn't toggled
+  // explicitly. Falls back to "dark" outside a browser context.
+  if (typeof window !== "undefined" && window.matchMedia) {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  return "dark";
+}
+
 const state = {
   view: "loading", // 'loading' | 'login' | 'app'
   section: "upload",
-  theme: "dark",
+  theme: getSystemTheme(),
   admin: null,
   loginUsername: "",
   loginPassword: "",
@@ -46,6 +55,10 @@ const state = {
   selectedIds: new Set(),
   bulkSourceGroup: "primal",
   bulkRecreate: false,
+  // True: перед загрузкой удалить старые чанки этого источника (safe
+  // re-index, default). False: добавить новые чанки в коллекцию рядом
+  // со старыми (полезно для side-by-side версий или append-режима).
+  bulkDeleteExisting: true,
   modal: null,
   bulkBusy: false,
   ws: null,
@@ -115,9 +128,86 @@ function fmtDate(value) {
   });
 }
 
+// Promise-based confirm dialog styled with the admin's own .modal classes.
+// Replaces `window.confirm(...)` so we don't get the native ugly browser
+// chrome. Resolves true on OK, false on Cancel / Escape / backdrop click.
+function customConfirm(message, opts = {}) {
+  return new Promise((resolve) => {
+    const title = opts.title || "Подтверждение";
+    const okLabel = opts.okLabel || "OK";
+    const cancelLabel = opts.cancelLabel || "Отмена";
+    const danger = !!opts.danger;
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="cc-title">
+        <h2 id="cc-title">${escapeHtml(title)}</h2>
+        <div class="modal__body" style="white-space: pre-wrap; line-height: 1.5;">${escapeHtml(message)}</div>
+        <div class="modal__actions">
+          <button type="button" class="btn" data-action="cancel">${escapeHtml(cancelLabel)}</button>
+          <button type="button" class="btn ${danger ? "btn--danger" : "btn--primary"}" data-action="ok">${escapeHtml(okLabel)}</button>
+        </div>
+      </div>
+    `;
+
+    function close(result) {
+      document.removeEventListener("keydown", onKey);
+      backdrop.remove();
+      resolve(result);
+    }
+
+    function onKey(e) {
+      if (e.key === "Escape") close(false);
+      else if (e.key === "Enter") close(true);
+    }
+
+    backdrop.addEventListener("click", (e) => {
+      if (e.target === backdrop) close(false);
+    });
+    backdrop.querySelector('[data-action="ok"]').addEventListener("click", () => close(true));
+    backdrop.querySelector('[data-action="cancel"]').addEventListener("click", () => close(false));
+
+    document.body.appendChild(backdrop);
+    document.addEventListener("keydown", onKey);
+    backdrop.querySelector('[data-action="ok"]').focus();
+  });
+}
+
+
 function setState(patch) {
   Object.assign(state, patch);
   render();
+}
+
+let _adminThemePersistInflight = null;
+function persistAdminTheme(theme) {
+  if (!state.admin) return;
+  if (_adminThemePersistInflight === theme) return;
+  _adminThemePersistInflight = theme;
+  fetch("/api/admin/theme", {
+    method: "PUT",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ theme }),
+  })
+    .catch(() => {})
+    .finally(() => {
+      if (_adminThemePersistInflight === theme) _adminThemePersistInflight = null;
+    });
+}
+
+async function loadAdminThemeFromServer() {
+  try {
+    const res = await fetch("/api/admin/theme", { credentials: "include" });
+    if (!res.ok) return;
+    const data = await res.json();
+    // null theme = админ ещё не выбирал → не оверрайдим системную.
+    if (data && (data.theme === "dark" || data.theme === "light")) {
+      state.theme = data.theme;
+      applyTheme();
+    }
+  } catch {}
 }
 
 function applyTheme() {
@@ -127,6 +217,7 @@ function applyTheme() {
 function toggleTheme() {
   state.theme = state.theme === "dark" ? "light" : "dark";
   applyTheme();
+  persistAdminTheme(state.theme);
   render();
 }
 
@@ -161,6 +252,8 @@ async function bootstrap() {
     if (window.location.pathname === "/admin/login") {
       window.history.replaceState({}, "", "/admin");
     }
+    // Pull saved theme so reload keeps the admin's choice.
+    loadAdminThemeFromServer();
     await loadSources();
     connectWS();
   } catch (err) {
@@ -204,7 +297,7 @@ async function createAdminUser() {
 }
 
 async function deleteAdminUser(adminId, username) {
-  if (!confirm(`Удалить администратора «${username}»?`)) return;
+  if (!(await customConfirm(`Удалить администратора «${username}»?`, { title: "Удаление администратора", okLabel: "Удалить", danger: true }))) return;
   try {
     await api(`/api/admin/admins/${adminId}`, { method: "DELETE" });
     setState({ adminUsers: state.adminUsers.filter((a) => a.id !== adminId) });
@@ -395,7 +488,22 @@ function connectWS() {
   ws.onmessage = (event) => {
     let evt;
     try { evt = JSON.parse(event.data); } catch { return; }
-    if (evt.type === "admin_npa_progress") {
+    if (evt.type === "admin_npa_progress_snapshot") {
+      // Sent by the backend right after WS accept — rebuilds the in-memory
+      // progressMap for any indexing/chunking job that was already in
+      // flight when the page reloaded.
+      const next = {};
+      for (const item of evt.items || []) {
+        if (!item || !item.npa_id) continue;
+        next[item.npa_id] = {
+          processed: item.processed ?? 0,
+          total: item.total ?? 0,
+          stage: item.stage || item.status || "",
+        };
+      }
+      state.progressMap = next;
+      render();
+    } else if (evt.type === "admin_npa_progress") {
       state.progressMap[evt.npa_id] = {
         processed: evt.processed,
         total: evt.total,
@@ -707,7 +815,10 @@ function clearSelection() {
 async function bulkDelete() {
   const ids = Array.from(state.selectedIds);
   if (!ids.length) return;
-  if (!confirm(`Удалить выбранные источники: ${ids.length} шт.? Точки в индексе не очищаются автоматически.`)) return;
+  if (!(await customConfirm(
+    `Удалить выбранные источники: ${ids.length} шт.?\nТочки в индексе не очищаются автоматически.`,
+    { title: "Удаление источников", okLabel: "Удалить", danger: true }
+  ))) return;
   state.bulkBusy = true;
   render();
   try {
@@ -734,9 +845,22 @@ async function startBulkIndex() {
   const groupLabel = SOURCE_GROUP_LABELS[state.bulkSourceGroup] || state.bulkSourceGroup;
   let confirmMsg = `Индексировать ${npas.length} источник(ов) в «${groupLabel}»?`;
   if (state.bulkRecreate) {
-    confirmMsg += "\n\n⚠️ ВНИМАНИЕ: «Очистить индекс» удалит ВСЕ остальные документы этого типа.";
+    confirmMsg += "\n\n⚠️ ВНИМАНИЕ: «Очистить индекс» удалит ВСЕ документы этого типа из коллекции — включая источники, не выбранные сейчас.";
+  } else if (state.bulkDeleteExisting) {
+    confirmMsg += "\n\n⚠️ Старые чанки выбранных источников будут удалены из индекса перед загрузкой новых.";
   }
-  if (!confirm(confirmMsg)) return;
+  // Danger-styling: красная кнопка только когда стираем — recreate (wipe
+  // всей коллекции) или delete_existing (удаление чанков выбранных
+  // источников). Append-режим — обычная синяя кнопка.
+  const isDanger = state.bulkRecreate || state.bulkDeleteExisting;
+  let okLabel = "Индексировать";
+  if (state.bulkRecreate) okLabel = "Очистить коллекцию и индексировать";
+  else if (state.bulkDeleteExisting) okLabel = "Перезаписать и индексировать";
+  if (!(await customConfirm(confirmMsg, {
+    title: "Индексация источников",
+    okLabel,
+    danger: isDanger,
+  }))) return;
 
   state.bulkBusy = true;
   render();
@@ -751,6 +875,7 @@ async function startBulkIndex() {
             // Only the FIRST source of a bulk run respects recreate=true so
             // we don't wipe the freshly indexed sources we just inserted.
             recreate_collection: state.bulkRecreate && i === 0,
+            delete_existing_for_source: state.bulkDeleteExisting,
           }),
         });
       } catch (err) {
@@ -859,6 +984,11 @@ function renderSourcesSection() {
       <label class="bulk-bar__check" title="Удалит ВСЕ остальные документы выбранного типа">
         <input type="checkbox" id="bulk-recreate" ${state.bulkRecreate ? "checked" : ""} ${state.bulkBusy ? "disabled" : ""} />
         <span>Очистить индекс</span>
+      </label>
+
+      <label class="bulk-bar__check" title="По умолчанию удаляет старые чанки источника перед загрузкой. Сними чтобы новые чанки добавились РЯДОМ со старыми (append-режим — будут дубли для статей, которые есть в обеих версиях).">
+        <input type="checkbox" id="bulk-delete-existing" ${state.bulkDeleteExisting ? "checked" : ""} ${state.bulkBusy || state.bulkRecreate ? "disabled" : ""} />
+        <span>Очистить все данные источника</span>
       </label>
 
       <div class="bulk-bar__actions">
@@ -1045,7 +1175,10 @@ function wrapMarkdown(text) {
 }
 
 async function deletePlan(code) {
-  if (!confirm(`Удалить тариф "${code}"? Действие необратимо.`)) return;
+  if (!(await customConfirm(
+    `Удалить тариф "${code}"?\nДействие необратимо.`,
+    { title: "Удаление тарифа", okLabel: "Удалить", danger: true }
+  ))) return;
   setState({ plansError: "" });
   try {
     await api(`/api/admin/plans/${encodeURIComponent(code)}`, { method: "DELETE" });
@@ -1339,6 +1472,7 @@ function bindSourcesSection(root) {
   root.querySelector("#bulk-index")?.addEventListener("click", startBulkIndex);
   root.querySelector("#bulk-group")?.addEventListener("change", (e) => { state.bulkSourceGroup = e.target.value; });
   root.querySelector("#bulk-recreate")?.addEventListener("change", (e) => { state.bulkRecreate = e.target.checked; render(); });
+  root.querySelector("#bulk-delete-existing")?.addEventListener("change", (e) => { state.bulkDeleteExisting = e.target.checked; render(); });
 }
 
 // ---- Shell + sidebar ----

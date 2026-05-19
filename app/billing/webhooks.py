@@ -93,8 +93,7 @@ async def yookassa_webhook(request: Request) -> dict:
         except Exception:
             LOGGER.exception("apply_purchase failed for payment=%s", event.payment_id)
             raise HTTPException(status_code=500, detail="Internal error") from None
-        # WS push so open tabs update without F5. Imported lazily to dodge
-        # circular imports between billing/* and realtime via server.py.
+        # Lazy import to dodge circular billing/* → realtime → server.py imports.
         try:
             from realtime import emit_to_user
 

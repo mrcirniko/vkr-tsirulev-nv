@@ -126,8 +126,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     await WS_MANAGER.register(user.id, websocket)
     try:
         while True:
-            # We don't expect client→server messages today, but we still
-            # need to read so disconnects propagate.
+            # Read keeps the socket open and lets disconnects propagate.
             await websocket.receive_text()
     except WebSocketDisconnect:
         pass

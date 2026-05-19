@@ -62,8 +62,7 @@ def route_after_written_form(state: ContractAgentState) -> str:
         return "check_data_sufficiency"
     if policy == "legal_only":
         return "check_data_sufficiency" if requires_written_form else "generate_recommendations"
-    # always_ask (or anything unknown): paused on a clarification when not
-    # required by law, otherwise fall through to the legal-status decision.
+    # always_ask: pause on clarification, otherwise legal-status decision.
     if state.get("clarification_needed") and state.get("clarification_stage") == "optional_contract_generation":
         return "ask_clarification"
     return "check_data_sufficiency" if requires_written_form else "generate_recommendations"

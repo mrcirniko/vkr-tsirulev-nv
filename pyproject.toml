@@ -67,6 +67,9 @@ filterwarnings = [
     # allowed_objects; nothing we can override from our side. Drop when the
     # upstream library passes the kwarg itself.
     "ignore:The default value of .allowed_objects. will change.*:",
+    # sentence-transformers / accelerate still use the old torch SDPA context
+    # manager. Mirrors the runtime filter in app/config.py.
+    "ignore:.*torch.backends.cuda.sdp_kernel.*:FutureWarning",
 ]
 
 [tool.coverage.run]

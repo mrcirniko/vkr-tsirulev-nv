@@ -145,8 +145,7 @@ def update_npa_source(
         npa.updated_at = _utcnow()
         session.flush()
         session.refresh(npa)
-        # Any change touching last_indexed_* must invalidate the registry so
-        # chunker/retriever see the new state without an app restart.
+        # Invalidate registry so chunker/retriever see the new state without an app restart.
         if last_indexed_collection is not None or status is not None:
             clear_source_registry_cache()
         return npa

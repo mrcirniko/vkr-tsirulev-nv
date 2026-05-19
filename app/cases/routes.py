@@ -147,10 +147,7 @@ async def api_chat(
     case_id = payload.case_id
     new_case = False
     if case_id is None:
-        # Free-plan quota gate: 10 case-creations per calendar month. Paid
-        # plans skip this branch entirely (limit=NULL). Edit-mode for free
-        # users is blocked downstream in the graph (gate_free_plan node) — we
-        # can't decide intent here without an LLM call.
+        # Quota gate; edit-mode for free users is blocked downstream by gate_free_plan node.
         try:
             await asyncio.to_thread(billing_service.enforce_create_case, user.id)
         except billing_service.QuotaExceeded as exc:
@@ -165,9 +162,7 @@ async def api_chat(
     elif not case_belongs_to_owner(case_id, user.id):
         raise HTTPException(status_code=404, detail="Case not found")
 
-    # Reject if there is already an in-flight assistant message for this case.
-    # The frontend should keep input disabled while loading, but we double-check
-    # server-side to be safe against stale tabs.
+    # Server-side guard against stale tabs sending a second message while one is in flight.
     latest = get_latest_message(case_id)
     if latest is not None and latest.status == MessageStatus.PROCESSING:
         raise HTTPException(
@@ -186,8 +181,7 @@ async def api_chat(
     user_dto = service.message_dto(user_message)
     assistant_dto = service.message_dto(assistant_message)
 
-    # Push WS notifications so other tabs (or the sidebar) see the new chat
-    # and the placeholder assistant bubble immediately.
+    # Push WS so other tabs see the new chat and placeholder bubble immediately.
     if new_case:
         await emit_to_user(
             user.id,

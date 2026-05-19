@@ -161,20 +161,22 @@ NPA_STATUS_ENUM = Enum(
 )
 
 
+ALLOWED_THEMES = ("dark", "light")
+
+
 class AdminUser(Base):
     __tablename__ = "admin_users"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     username: Mapped[str] = mapped_column(Text, nullable=False, unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    theme: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), default=_utcnow
     )
 
 
-# Free-form strings rather than a Postgres enum so future policies (e.g.
-# "draft_first") can be added without a migration. Allowed values are
-# enforced at the API and graph layers.
+# String column (not enum) so new policies don't need a migration. Validated at API/graph layer.
 CONTRACT_POLICY_LEGAL_ONLY = "legal_only"
 CONTRACT_POLICY_ALWAYS = "always"
 CONTRACT_POLICY_ALWAYS_ASK = "always_ask"
@@ -193,6 +195,7 @@ class UserPreferences(Base):
         Text, nullable=False, default=CONTRACT_POLICY_LEGAL_ONLY, server_default=CONTRACT_POLICY_LEGAL_ONLY
     )
     ask_personal_data: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    theme: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -240,10 +243,8 @@ class NpaSource(Base):
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
-# Plan codes are admin-editable strings, not a Postgres enum — admins create
-# new tiers from the UI, so no schema migration required to introduce one.
-# The single reserved code is FREE_PLAN_CODE: quota fallback + edit-gate hard
-# logic depends on it.
+# Plan codes are admin-editable strings, not a Postgres enum. FREE_PLAN_CODE is hard-referenced
+# by quota fallback and edit-gate logic.
 FREE_PLAN_CODE = "free"
 
 

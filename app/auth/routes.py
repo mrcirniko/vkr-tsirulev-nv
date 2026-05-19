@@ -84,9 +84,8 @@ async def google_callback(request: Request):
 
 
 # ---- Yandex OAuth ----
-# Implemented manually via httpx (not authlib) because authlib's non-OIDC
-# state management conflicts with Starlette sessions in some proxy setups,
-# and Yandex uses Authorization: OAuth (not Bearer) for userinfo.
+# Hand-rolled via httpx — authlib's non-OIDC state mgmt conflicts with Starlette under some proxies,
+# and Yandex uses `Authorization: OAuth` (not Bearer) for userinfo.
 
 _YANDEX_AUTH_URL = "https://oauth.yandex.ru/authorize"
 _YANDEX_TOKEN_URL = "https://oauth.yandex.ru/token"  # noqa: S105
@@ -167,8 +166,7 @@ async def yandex_callback(request: Request):
     email = (
         userinfo.get("default_email")
         or next(iter(userinfo.get("emails") or []), None)
-        # Fallback: Yandex always assigns login@yandex.ru even when email
-        # scope is missing or the account was created via phone number.
+        # Fallback: Yandex always has login@yandex.ru even without email scope.
         or (f"{userinfo['login']}@yandex.ru" if userinfo.get("login") else None)
     )
     if not yandex_id or not email:

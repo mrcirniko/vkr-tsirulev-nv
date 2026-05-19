@@ -109,12 +109,7 @@ class SentenceTransformerEmbeddingProvider:
     def embed_query(self, query: str) -> list[float]:
         prompt = None
         if not settings.embedding_query_instruction_disabled and settings.embedding_query_instruction:
-            # E5/Instructor-style asymmetric prefix. SentenceTransformer.encode
-            # prepends `prompt` to the actual text before tokenization, so the
-            # final input becomes:
-            #   Instruct: <task>\nQuery: <user query>
-            # Documents in the index are encoded WITHOUT this prefix, which is
-            # exactly what instruction-tuned encoders like Giga-Embeddings expect.
+            # Asymmetric prefix for instruction-tuned encoders (Giga-Embeddings); documents stay plain.
             prompt = f"Instruct: {settings.embedding_query_instruction.strip()}\nQuery: "
         return self._encode([(query or "").strip()], prompt=prompt)[0]
 

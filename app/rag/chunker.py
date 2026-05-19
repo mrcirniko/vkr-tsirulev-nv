@@ -275,8 +275,7 @@ def _extract_same_doc_references(text: str, current_source: str | None) -> list[
     if current_source in source_by_name():
         markers = source_by_name()[current_source].same_doc_markers
     else:
-        # Fallback for sources not yet in the registry (first upload before
-        # any indexing has happened). Derive markers from the name string.
+        # First-upload fallback: registry empty, derive markers from the name string.
         from rag.source_registry import _same_doc_markers
 
         markers = _same_doc_markers(current_source)
@@ -325,9 +324,7 @@ def _extract_same_doc_references_morphology(text: str, current_source: str | Non
     references: list[str] = []
     normalized_markers = _normalized_same_doc_markers().get(current_source)
     if not normalized_markers:
-        # current_source is not in the registry yet (very first upload) —
-        # derive markers from the source string directly so self-references
-        # like "статьей 432 настоящего Кодекса" still get caught.
+        # First-upload fallback so self-references like "настоящего Кодекса" still match.
         from rag.source_registry import _same_doc_markers
 
         raw_markers = _same_doc_markers(current_source)

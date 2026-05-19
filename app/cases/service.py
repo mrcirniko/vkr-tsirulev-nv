@@ -36,8 +36,7 @@ LOGGER = logging.getLogger("cases.service")
 _case_locks: dict[str, asyncio.Lock] = {}
 _case_locks_guard = asyncio.Lock()
 
-# Strong refs to fire-and-forget background tasks, so the event loop's weakref
-# doesn't drop them mid-flight. Tasks remove themselves on completion.
+# Strong refs prevent the event loop's weakref from dropping tasks mid-flight.
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 
@@ -319,16 +318,11 @@ async def process_chat_run(
             await _mark_case_error(user_id, case_id)
             return
 
-    # Outside the lock: emit case_updated, push new contract versions, schedule
-    # title regen if deal_type changed.
     refreshed = get_case(case_id)
     if refreshed is None:
         return
 
-    # New contract DOCX versions produced by this run (regenerate or edit
-    # paths). save_result inside the graph commits them to contract_versions;
-    # we replay the diff here and emit one WS event per fresh version so the
-    # right-side panel updates without an F5.
+    # Emit one WS event per fresh contract version so the right panel updates without F5.
     try:
         all_versions = get_contract_versions(case_id)
         for version in all_versions:
@@ -353,6 +347,23 @@ async def process_chat_run(
                 "case": _case_summary_dict(refreshed),
             },
         )
+
+    # Emit clarification state unconditionally so the banner appears/hides without a GET.
+    try:
+        final_state = await langgraph.get_thread_state(case_id)
+        state_values = langgraph.state_values(final_state) if final_state else {}
+        await emit_to_user(
+            user_id,
+            {
+                "type": "case_clarification_changed",
+                "case_id": case_id,
+                "clarification_needed": bool(state_values.get("clarification_needed", False)),
+                "clarification_question": state_values.get("clarification_question"),
+                "processing_stage": state_values.get("processing_stage"),
+            },
+        )
+    except Exception:
+        LOGGER.exception("Failed to emit clarification state case_id=%s", case_id)
 
     new_deal_type = refreshed.deal_type
     if new_deal_type and new_deal_type != prev_deal_type:

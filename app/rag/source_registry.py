@@ -298,18 +298,7 @@ def resolve_same_doc_reference(current_source: str, article_number: str | None) 
 
 
 def infer_specific_source_filter(text: str) -> str | None:
-    lowered_words = {_clean_alias(match.group(0)) for match in WORD_RE.finditer(text.lower())}
-    if not lowered_words:
-        return None
-
-    best_source = None
-    best_score = 0
-    for item in get_source_registry():
-        if item.group != PRIMAL_GROUP:
-            continue
-        source_words = set(_clean_alias(item.source).split())
-        score = len(source_words.intersection(lowered_words))
-        if score > best_score:
-            best_score = score
-            best_source = item.source
-    return best_source if best_score > 0 else None
+    """Heuristic disabled — lexical match against PRIMAL source names was unreliable.
+    Stub kept so callers don't need to change if the approach is restored.
+    """
+    return None

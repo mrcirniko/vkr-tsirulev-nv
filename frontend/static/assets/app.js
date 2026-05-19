@@ -1,3 +1,13 @@
+function getSystemTheme() {
+  // Browser prefers-color-scheme: default when the user hasn't toggled
+  // explicitly. Defensive on non-browser contexts (tests, SSR) — falls
+  // back to "dark" if matchMedia is unavailable.
+  if (typeof window !== "undefined" && window.matchMedia) {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  return "dark";
+}
+
 const emptyDetail = {
   id: null,
   title: "",
@@ -17,7 +27,7 @@ const state = {
   detail: { ...emptyDetail },
   prompt: "",
   error: null,
-  theme: "dark",
+  theme: getSystemTheme(),
   sidebarOpen: true,
   searchOpen: false,
   searchTerm: "",
@@ -241,6 +251,11 @@ async function checkAuth() {
   } finally {
     state.authChecked = true;
   }
+  if (state.currentUser) {
+    // Pull saved theme from the server so reloads keep the user's choice.
+    // Fire-and-forget — applyTheme() inside re-renders if it differs.
+    loadThemeFromServer();
+  }
 }
 
 async function logout() {
@@ -256,9 +271,33 @@ function applyTheme() {
   document.documentElement.dataset.theme = state.theme;
 }
 
+// Debounced renderer. Server emits message_updated + case_version_added +
+// case_updated + case_clarification_changed in succession after a contract
+// finishes; each arrives in its own JS task on the loopback network, often
+// 5-30 ms apart. rAF batches only within a single frame, so spaced-out
+// events still produced visible double redraws. setTimeout with a small
+// window (32 ms = ~2 frames) coalesces them into a single DOM pass — short
+// enough that the user perceives the result as instant.
+const _RENDER_BATCH_MS = 32;
+let _renderTimer = null;
 function renderSoon() {
+  if (_renderTimer !== null) return;
+  _renderTimer = setTimeout(() => {
+    _renderTimer = null;
+    render();
+    scrollChatToBottom();
+  }, _RENDER_BATCH_MS);
+}
+
+// Escape hatch for the few call sites that need a synchronous render
+// before reading layout (e.g. focus management right after switching cases).
+function renderNow() {
+  if (_renderTimer !== null) {
+    clearTimeout(_renderTimer);
+    _renderTimer = null;
+  }
   render();
-  requestAnimationFrame(scrollChatToBottom);
+  scrollChatToBottom();
 }
 
 function setState(patch) {
@@ -437,6 +476,21 @@ function handleWsEvent(event) {
         ).forEach((el) => {
           el.textContent = stageText;
         });
+      }
+      break;
+    }
+    case "case_clarification_changed": {
+      // Fired by the backend after each run completes. Tells us whether
+      // the agent is now waiting on another clarification or has moved on
+      // — keeps the "Нужно уточнение" banner in sync without an F5.
+      if (state.currentCaseId === event.case_id) {
+        state.detail = {
+          ...state.detail,
+          clarification_needed: !!event.clarification_needed,
+          clarification_question: event.clarification_question ?? null,
+          processing_stage: event.processing_stage ?? state.detail.processing_stage,
+        };
+        renderSoon();
       }
       break;
     }
@@ -888,6 +942,41 @@ function toggleTheme() {
   state.theme = state.theme === "dark" ? "light" : "dark";
   applyTheme();
   renderSoon();
+  // Persist asynchronously — never block the UI on the network. Failures
+  // are tolerable; theme is in-state-only until next persist succeeds.
+  persistTheme(state.theme);
+}
+
+let _themePersistInflight = null;
+function persistTheme(theme) {
+  if (!state.currentUser) return;  // not logged in; nothing to persist against
+  if (_themePersistInflight === theme) return;  // dedup rapid toggles
+  _themePersistInflight = theme;
+  fetch("/api/preferences", {
+    method: "PUT",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ theme }),
+  })
+    .catch(() => {})
+    .finally(() => {
+      if (_themePersistInflight === theme) _themePersistInflight = null;
+    });
+}
+
+async function loadThemeFromServer() {
+  try {
+    const res = await fetch("/api/preferences", { credentials: "include" });
+    if (!res.ok) return;
+    const data = await res.json();
+    // Server returns null when the user has never toggled — keep the
+    // system-derived theme we initialized with. Only override on an
+    // explicit "dark"/"light" coming from the DB.
+    if (data && (data.theme === "dark" || data.theme === "light")) {
+      state.theme = data.theme;
+      applyTheme();
+    }
+  } catch {}
 }
 
 function scrollChatToBottom() {
