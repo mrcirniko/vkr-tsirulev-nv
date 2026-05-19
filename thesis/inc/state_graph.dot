@@ -1,0 +1,222 @@
+// Граф состояний интеллектуального агента — нотация UML Activity Diagram.
+// Структура и рёбра строго соответствуют функции build_state_graph
+// в файле diploma-agent/app/agent/graph.py.
+// Рендеринг: dot -Tpdf inc/state_graph.dot -o inc/state_graph.pdf
+digraph StateGraph {
+    rankdir   = TB;
+    nodesep   = 0.20;
+    ranksep   = 0.35;
+    bgcolor   = "white";
+    splines   = ortho;
+    compound  = true;
+    fontname  = "Times New Roman";
+    node  [fontname="Times New Roman", fontsize=10, shape=box, style="rounded,filled", margin="0.10,0.05"];
+    edge  [fontname="Times New Roman", fontsize=8.5, arrowsize=0.65];
+
+    // ============================================================
+    // ТЕРМИНАЛЫ (вход и четыре исхода)
+    // ============================================================
+    Start    [shape=circle,       label="", fillcolor="black", color="black", width=0.30, height=0.30, fixedsize=true];
+    EndOK    [shape=doublecircle, label="", fillcolor="black", color="black", width=0.32, height=0.32, fixedsize=true];
+
+    // ============================================================
+    // КЛАСТЕР: маршрутизация и контроль тарифа
+    // ============================================================
+    subgraph cluster_routing {
+        label    = "Маршрутизация и контроль тарифа";
+        style    = "rounded,filled";
+        color    = "#f9a825";
+        fillcolor= "#fffde7";
+        fontsize = 11;
+        fontname = "Times New Roman Bold";
+        margin   = 10;
+
+        Route    [label="route_user_message\nмаршрутизация намерения", fillcolor="#fff59d", color="#f9a825"];
+        Gate     [label="gate_free_plan\nпрограммная преграда тарифа", fillcolor="#fff59d", color="#f9a825"];
+    }
+
+    // ============================================================
+    // КЛАСТЕР: ветвь дополнительных вопросов (followup)
+    // ============================================================
+    subgraph cluster_followup {
+        label    = "Ветвь дополнительных вопросов";
+        style    = "rounded,filled";
+        color    = "#fd7e14";
+        fillcolor= "#fff3e0";
+        fontsize = 11;
+        fontname = "Times New Roman Bold";
+        margin   = 10;
+
+        Fup      [label="followup_response\nтриаж дополнительного вопроса",        fillcolor="#ffe0b2", color="#fd7e14"];
+        FupSub   [label="followup_subagent_search\nизолированный поиск по корпусу", fillcolor="#ffe0b2", color="#fd7e14"];
+    }
+
+    // ============================================================
+    // КЛАСТЕР: ветвь точечной правки
+    // ============================================================
+    subgraph cluster_edit {
+        label    = "Точечная правка";
+        style    = "rounded,filled";
+        color    = "#7e57c2";
+        fillcolor= "#f3e5f5";
+        fontsize = 11;
+        fontname = "Times New Roman Bold";
+        margin   = 10;
+
+        Edit     [label="edit_contract\nточечная правка готового документа", fillcolor="#e1bee7", color="#7e57c2"];
+    }
+
+    // ============================================================
+    // КЛАСТЕР: классификация сделки
+    // ============================================================
+    subgraph cluster_classify {
+        label    = "Классификация сделки";
+        style    = "rounded,filled";
+        color    = "#2e7d32";
+        fillcolor= "#e8f5e9";
+        fontsize = 14;
+        fontname = "Times New Roman Bold";
+        margin   = 10;
+
+        LoadG    [label="load_general_norms\nзагрузка общих норм договорного права", fillcolor="#c8e6c9", color="#2e7d32"];
+        Classify [label="classify_deal\nосновной классификатор +\nRAG-субагент при низкой уверенности", fillcolor="#c8e6c9", color="#2e7d32"];
+        Unsup    [label="inform_unsupported_deal\nвежливый отказ:\nтип сделки не поддерживается", fillcolor="#c8e6c9", color="#2e7d32"];
+    }
+
+    // ============================================================
+    // КЛАСТЕР: проверка общих норм и поиск специальных норм
+    // ============================================================
+    subgraph cluster_checks {
+        label    = "Проверка общих норм и поиск специальных";
+        style    = "rounded,filled";
+        color    = "#1565c0";
+        fillcolor= "#e3f2fd";
+        fontsize = 11;
+        fontname = "Times New Roman Bold";
+        margin   = 10;
+
+        CheckGen [label="check_general_norms\nправовая допустимость по общим нормам", fillcolor="#bbdefb", color="#1565c0"];
+        Inform   [label="inform_user\nвежливый отказ:\nправовое препятствие",          fillcolor="#bbdefb", color="#1565c0"];
+        Retrieve [label="retrieve_norms\nдвухступенчатый RAG-поиск\n(см. подраздел 2.2)", fillcolor="#bbdefb", color="#1565c0"];
+    }
+
+    // ============================================================
+    // КЛАСТЕР: проверки формы и достаточности данных
+    // ============================================================
+    subgraph cluster_form {
+        label    = "Проверки формы и достаточности данных";
+        style    = "rounded,filled";
+        color    = "#ef6c00";
+        fillcolor= "#fff8e1";
+        fontsize = 11;
+        fontname = "Times New Roman Bold";
+        margin   = 10;
+
+        Written  [label="check_written_form\nтребуется ли письменная форма",       fillcolor="#ffe082", color="#ef6c00"];
+        Data     [label="check_data_sufficiency\nдостаточно ли данных для договора", fillcolor="#ffe082", color="#ef6c00"];
+        Ask      [shape=note, label="ask_clarification\nприостановка графа,\nожидание ответа пользователя", fillcolor="#fff3e0", color="#bf360c"];
+        OptAns   [label="optional_contract_answer\nвозобновление после\nответа «да/нет»",  fillcolor="#ffe082", color="#ef6c00"];
+    }
+
+    // ============================================================
+    // КЛАСТЕР: генерация проекта договора и итеративная валидация
+    // ============================================================
+    subgraph cluster_generate {
+        label    = "Генерация и итеративная валидация";
+        style    = "rounded,filled";
+        color    = "#ad1457";
+        fillcolor= "#fce4ec";
+        fontsize = 11;
+        fontname = "Times New Roman Bold";
+        margin   = 10;
+
+        Gen      [label="generate_contract\nHTML-проект договора",            fillcolor="#f8bbd0", color="#ad1457"];
+        Validate [label="validate_contract\nпроверка существенных условий",    fillcolor="#f8bbd0", color="#ad1457"];
+        Loop     [label="handle_validation_error\nинкремент счётчика итераций", fillcolor="#f8bbd0", color="#ad1457"];
+    }
+
+    // ============================================================
+    // КЛАСТЕР: формирование рекомендаций и сохранение результата
+    // ============================================================
+    subgraph cluster_output {
+        label    = "Формирование рекомендаций и сохранение результата";
+        style    = "rounded,filled";
+        color    = "#00695c";
+        fillcolor= "#e0f2f1";
+        fontsize = 11;
+        fontname = "Times New Roman Bold";
+        margin   = 10;
+
+        Recs     [label="generate_recommendations\nюридический отчёт (Markdown)", fillcolor="#b2dfdb", color="#00695c"];
+        Enrich   [label="enrich_recommendations\nуточнение бланкетных отсылок", fillcolor="#b2dfdb", color="#00695c"];
+        Save     [label="save_result\nконвертация в DOCX, обновление кейса", fillcolor="#b2dfdb", color="#00695c"];
+    }
+
+    // ============================================================
+    // РЁБРА ГРАФА (точно по graph.py)
+    // ============================================================
+
+    // Вход
+    Start    -> Route;
+
+    // Маршрутизация по типу намерения
+    Route    -> LoadG  [label="намерение = новая сделка"];
+    Route    -> Fup    [label="намерение = доп. вопрос"];
+    Route    -> Edit   [label="намерение = правка,\nплатный тариф"];
+    Route    -> Gate   [label="намерение = правка,\nбесплатный тариф"];
+
+    // Программная преграда
+    Gate     -> EndOK [label="ответ:\nотказ по тарифу"];
+
+    // Followup
+    Fup      -> FupSub [label="нужен поиск\nпо корпусу"];
+    Fup      -> EndOK  [label="прямой ответ\nиз контекста"];
+    FupSub   -> FupSub [label="следующая итерация поиска", style=dashed, color="#fd7e14"];
+    FupSub   -> EndOK  [label="ответ найден\nили лимит попыток"];
+
+    // Точечная правка
+    Edit     -> Validate [label="HTML-проект обновлён"];
+
+    // Классификация
+    LoadG    -> Classify;
+    Classify -> Ask    [label="нужно уточнить тип\n(stage=classification)",
+                        style=dashed, color="#bf360c"];
+    Classify -> Unsup  [label="тип не из\nподдерживаемых"];
+    Classify -> CheckGen [label="тип определён\nуверенно"];
+
+    // Терминалы
+    Ask      -> EndOK  [label="пауза → ожидание\nответа пользователя",
+                        style=dashed, color="#bf360c"];
+    Unsup    -> EndOK  [label="ответ: тип сделки\nне поддерживается"];
+
+    // Проверка общих норм
+    CheckGen -> Inform   [label="препятствие"];
+    CheckGen -> Retrieve [label="препятствий нет"];
+    Inform   -> EndOK    [label="ответ: правовое\nпрепятствие"];
+
+    // Поиск специальных норм → проверки формы и данных
+    Retrieve -> Written;
+    Written  -> Ask        [label="политика «спрашивать»\nи закон допускает устную форму\n(stage=optional_contract_generation)",
+                            style=dashed, color="#bf360c"];
+    Written  -> Recs       [label="договор не нужен:\nтолько рекомендации"];
+    Written  -> Data       [label="договор будет генерироваться"];
+    Data     -> Ask        [label="нехватка данных\n(stage=data_sufficiency)",
+                            style=dashed, color="#bf360c"];
+    Data     -> Gen        [label="данных достаточно"];
+
+    // Возобновление после ответа «да/нет» на вопрос о форме
+    OptAns   -> Data       [label="ответ «да»:\nнужен договор"];
+    OptAns   -> Recs       [label="ответ «нет»:\nдоговор не нужен"];
+
+    // Генерация и валидация
+    Gen      -> Validate;
+    Validate -> Loop       [label="есть замечания,\nitr < лимита"];
+    Validate -> Recs       [label="валиден ИЛИ\nлимит итераций исчерпан"];
+    Validate -> Save       [label="режим правки:\nбез цикла регенерации"];
+    Loop     -> Data       [label="новая итерация\nс учётом замечаний"];
+
+    // Финал
+    Recs     -> Enrich;
+    Enrich   -> Save;
+    Save     -> EndOK      [label="ответ: проект\nдоговора + рекомендации"];
+}

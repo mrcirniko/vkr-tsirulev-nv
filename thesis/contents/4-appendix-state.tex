@@ -1,0 +1,71 @@
+\appendixsection{Состояние агента}
+
+В таблице~\ref{tab:state-fields} приведена полная спецификация полей типизированного состояния агента, определённого в модуле \texttt{state.py}. Состояние представляет собой словарь, наследующий стандартный \texttt{MessagesState} из библиотеки LangGraph; все собственные поля помечены признаком необязательного присутствия (\texttt{total=False}), что отражает характер их заполнения: каждое поле проставляется одним из узлов графа в свой момент времени, остальные узлы либо читают его, либо игнорируют. Поля сгруппированы по фазе обработки: входной запрос и классификация, поиск, проверки, выходные артефакты, контекст пользователя, субагент обработки дополнительных вопросов.
+
+\landscapestart
+\footnotesize
+\begin{longtable}[H]{|>{\raggedright\arraybackslash}p{90mm}|>{\raggedright\arraybackslash}p{38mm}|>{\raggedright\arraybackslash}p{195mm}|}
+    \caption{Поля состояния ContractAgentState}\label{tab:state-fields} \\ \hline
+    \textbf{Поле} & \textbf{Тип} & \textbf{Назначение} \\ \hline
+    \endfirsthead
+    \caption*{Продолжение таблицы~\ref{tab:state-fields}} \\ \hline
+    \textbf{Поле} & \textbf{Тип} & \textbf{Назначение} \\ \hline
+    \endhead
+    \hline
+    \endfoot
+    \hline
+    \endlastfoot
+
+    \code{case_id} & \code{str} & Идентификатор кейса, одновременно идентификатор потока в LangGraph \\ \hline
+    \code{deal_description} & \code{str} & Исходное словесное описание сделки от пользователя \\ \hline
+    \code{deal_type} & \code{str | None} & Гражданско-правовой тип сделки после классификации \\ \hline
+    \code{deal_type_confidence} & \code{str | None} & Уровень уверенности классификатора: low, medium, high \\ \hline
+    \code{deal_classify_confidence} & \code{str | None} & Дополнительная оценка уверенности субагента классификации \\ \hline
+    \code{classification_clarification_attempts} & \code{int} & Счётчик попыток уточнения типа сделки \\ \hline
+    \code{max_classification_clarifications} & \code{int} & Жёсткий лимит на число уточнений классификации \\ \hline
+    \code{clarification_stage} & \code{str | None} & Текущая стадия запроса уточнения: \code{classification}, \code{data_sufficiency} или \code{optional_contract_generation} \\ \hline
+    \code{deal_structure} & \code{dict | None} & Структурированное представление сделки в виде словаря <<поле:значение>> \\ \hline
+    \code{retrieval_query} & \code{str | None} & Запрос для поиска специальных норм \\ \hline
+    \code{general_norms} & \code{list[dict] | None} & Чанки общих норм, загруженные в начале обработки \\ \hline
+    \code{retrieved_norms} & \code{list[dict] | None} & Чанки специальных норм \\ \hline
+    \code{general_check_passed} & \code{bool} & Признак прохождения проверки общих норм договорного права \\ \hline
+    \code{general_check_issues} & \code{list[str] | None} & Перечень выявленных правовых препятствий \\ \hline
+    \code{general_check_explanation} & \code{str | None} & Пояснение для пользователя при выявленном препятствии \\ \hline
+    \code{clarification_needed} & \code{bool} & Признак необходимости запросить уточнение у пользователя \\ \hline
+    \code{clarification_question} & \code{str | None} & Текст уточняющего вопроса \\ \hline
+    \code{missing_fields} & \code{list[str] | None} & Список недостающих полей для подготовки договора \\ \hline
+    \code{requires_written_form} & \code{bool | None} & Признак необходимости письменной формы для сделки \\ \hline
+    \code{written_form_reason} & \code{str | None} & Краткое обоснование требования письменной формы \\ \hline
+    \code{generate_optional_contract} & \code{bool | None} & Решение пользователя о необходимости генерировать проект договора \\ \hline
+    \code{contract_md} & \code{str | None} & Текстовое превью сгенерированного договора \\ \hline
+    \code{contract_html} & \code{str | None} & HTML-разметка сгенерированного договора \\ \hline
+    \code{recommendations} & \code{str | None} & Юридические рекомендации в формате Markdown \\ \hline
+    \code{validation_errors} & \code{list[str] | None} & Замечания валидации текущей итерации \\ \hline
+    \code{iteration_count} & \code{int} & Текущая итерация цикла регенерации \\ \hline
+    \code{max_iterations} & \code{int} & Жёсткий лимит на число итераций цикла регенерации \\ \hline
+    \code{result_docx_path} & \code{str | None} & Путь к итоговому DOCX-файлу (S3-ключ или локальный путь) \\ \hline
+    \code{result_saved} & \code{bool} & Признак завершения сохранения результата \\ \hline
+    \code{processing_stage} & \code{str | None} & Локализованное название текущей фазы обработки для WebSocket-уведомлений \\ \hline
+    \code{intent} & \code{str | None} & Намерение пользователя: \code{regenerate}, \code{edit} или \code{followup} \\ \hline
+    \code{contract_valid} & \code{bool | None} & Признак валидности проекта по результатам узла \code{validate_contract} \\ \hline
+    \code{edit_summary} & \code{str | None} & Краткое описание правки от узла \code{edit_contract} \\ \hline
+    \code{edit_changed_sections} & \code{list[str] | None} & Список разделов, затронутых точечной правкой \\ \hline
+    \code{user_plan} & \code{str | None} & Код активного тарифного плана, инжектируется до запуска графа \\ \hline
+    \code{allow_edit} & \code{bool} & Биллинговый признак разрешения редактирования \\ \hline
+    \code{contract_generation_policy} & \code{str | None} & Политика подготовки документа: \code{legal_only}, \code{always}, \code{always_ask} \\ \hline
+    \code{ask_personal_data} & \code{bool} & Пользовательская настройка: спрашивать ли персональные данные \\ \hline
+    \code{final_contract_exchange} & \code{dict | None} & Стэшированный последний обмен LLM для дампа после валидации \\ \hline
+    \code{final_recommendations_exchange} & \code{dict | None} & Стэшированный последний обмен LLM для рекомендаций \\ \hline
+    \code{retrieve_norms_latency_ms} & \code{float | None} & Измеренная задержка узла \code{retrieve_norms} \\ \hline
+    \code{subagent_active} & \code{bool} & Признак активности субагента дополнительных вопросов \\ \hline
+    \code{subagent_brief} & \code{str | None} & Бриф для субагента обработки дополнительных вопросов \\ \hline
+    \code{subagent_user_question} & \code{str | None} & Вопрос пользователя, переданный субагенту \\ \hline
+    \code{subagent_query} & \code{str | None} & Текущая формулировка поискового запроса субагента \\ \hline
+    \code{subagent_query_history} & \code{list[str] | None} & Накопленный список уже использованных формулировок \\ \hline
+    \code{subagent_attempts} & \code{int} & Счётчик попыток субагента обработки дополнительных вопросов \\ \hline
+    \code{subagent_max_attempts} & \code{int} & Жёсткий лимит на число попыток субагента обработки дополнительных вопросов \\ \hline
+\end{longtable}
+\normalsize
+\landscapestop
+
+Поле \texttt{messages} наследуется из \texttt{MessagesState} и содержит историю диалога пользователя с агентом в формате LangChain BaseMessage. Поля \code{user_plan}, \code{allow_edit}, \code{contract_generation_policy}, \code{ask_personal_data}, \code{max_iterations}, \code{max_classification_clarifications} инжектируются в начальное состояние сервером FastAPI из переменных окружения и активной подписки пользователя в момент запуска прохода и не изменяются в его пределах.

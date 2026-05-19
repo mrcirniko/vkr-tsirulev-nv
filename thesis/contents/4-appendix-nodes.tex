@@ -1,0 +1,44 @@
+\appendixsection{Полный перечень узлов графа}
+
+В таблице~\ref{tab:nodes-full} приведена развёрнутая таблица всех узлов графа, реализованных в модуле \texttt{nodes.py} и собранных в граф в модуле \texttt{graph.py}. Для каждого узла указаны: фаза обработки, ключевые читаемые из состояния поля (вход), записываемые в состояние поля (выход), используемые промпты из модуля \texttt{prompts.py}, а также внешние сервисы, к которым узел обращается. Полные тексты промптов, перечисленных в столбце <<Промпт>>, приведены в приложении~В.
+
+\landscapestart
+\footnotesize
+\begin{longtable}[H]{|>{\raggedright\arraybackslash}p{52mm}|>{\raggedright\arraybackslash}p{30mm}|>{\raggedright\arraybackslash}p{52mm}|>{\raggedright\arraybackslash}p{52mm}|>{\raggedright\arraybackslash}p{105mm}|>{\raggedright\arraybackslash}p{28mm}|}
+    \caption{Узлы графа состояний агента}\label{tab:nodes-full} \\ \hline
+    \textbf{Узел} & \textbf{Фаза} & \textbf{Входы} & \textbf{Выходы} & \textbf{Промпт} & \textbf{Сервисы} \\ \hline
+    \endfirsthead
+    \caption*{Продолжение таблицы~\ref{tab:nodes-full}} \\ \hline
+    \textbf{Узел} & \textbf{Фаза} & \textbf{Входы} & \textbf{Выходы} & \textbf{Промпт} & \textbf{Сервисы} \\ \hline
+    \endhead
+    \hline
+    \endfoot
+    \hline
+    \endlastfoot
+
+    \code{route_user_message} & маршрутизация & \code{messages} & \code{intent}, \code{processing_stage} & \code{CLASSIFY_FOLLOWUP_INTENT_PROMPT} & LLM \\ \hline
+    \code{gate_free_plan} & биллинговая преграда & \code{allow_edit}, \code{intent} & \code{messages}, \code{processing_stage} & --- & PostgreSQL \\ \hline
+    \code{load_general_norms} & загрузка корпуса & --- & \code{general_norms} & --- & Qdrant \\ \hline
+    \code{classify_deal} & классификация & \code{deal_description}, \code{general_norms} & \code{deal_type}, \code{deal_structure}, \code{deal_type_confidence}, \code{clarification_needed} & \code{build_classify_deal_prompt}, \code{build_classify_rag_assist_prompt} & LLM, Qdrant \\ \hline
+    \code{inform_unsupported_deal} & вспомогательный & \code{deal_description} & \code{messages} & \code{build_inform_unsupported_deal_prompt} & LLM \\ \hline
+    \code{check_general_norms} & проверка & \code{deal_description}, \code{general_norms}, \code{deal_type} & \code{general_check_passed}, \code{general_check_issues}, \code{general_check_explanation} & \code{CHECK_GENERAL_NORMS_PROMPT} & LLM \\ \hline
+    \code{inform_user} & вспомогательный & \code{general_check_issues}, \code{general_check_explanation} & \code{messages} & \code{INFORM_USER_PROMPT} & LLM \\ \hline
+    \code{retrieve_norms} & RAG-поиск & \code{deal_type}, \code{deal_description}, \code{retrieval_query} & \code{retrieved_norms}, \code{retrieve_norms_latency_ms} & \code{BUILD_RETRIEVAL_QUERY_PROMPT}, \code{FILTER_RETRIEVED_NORMS_PROMPT}; при включённом итеративном пути~--- \code{ITERATIVE_RETRIEVAL_PLANNER_PROMPT}, \code{ITERATIVE_RELEVANCE_JUDGE_PROMPT}, \code{DETECT_VAGUE_REFERENCES_IN_NORMS_PROMPT} & LLM, Qdrant, реранкер \\ \hline
+    \code{check_written_form} & проверка & \code{retrieved_norms}, \code{deal_type}, \code{contract_generation_policy} & \code{requires_written_form}, \code{written_form_reason}, \code{clarification_stage} & \code{CHECK_WRITTEN_FORM_PROMPT}, \code{CLASSIFY_YESNO_PROMPT} & LLM \\ \hline
+    \code{check_data_sufficiency} & проверка & \code{deal_description}, \code{retrieved_norms}, \code{validation_errors}, \code{ask_personal_data} & \code{missing_fields}, \code{clarification_question}, \code{deal_structure} & \code{build_check_data_sufficiency_prompt} & LLM \\ \hline
+    \code{ask_clarification} & прерывание & \code{clarification_question}, \code{clarification_stage} & --- & --- & --- \\ \hline
+    \code{optional_contract_answer} & вспомогательный & \code{messages} & \code{generate_optional_contract}, \code{clarification_stage} & \code{CLASSIFY_YESNO_PROMPT} & LLM \\ \hline
+    \code{generate_contract} & генерация & \code{deal_type}, \code{deal_description}, \code{deal_structure}, \code{general_norms}, \code{retrieved_norms}, \code{validation_errors} & \code{contract_html}, \code{contract_md}, \code{final_contract_exchange} & \code{GENERATE_CONTRACT_PROMPT} & LLM \\ \hline
+    \code{edit_contract} & точечная правка & \code{contract_html}, \code{messages} & \code{contract_html}, \code{edit_summary}, \code{edit_changed_sections} & \code{EDIT_CONTRACT_PROMPT} & LLM \\ \hline
+    \code{validate_contract} & LLM-судья & \code{contract_html}, \code{deal_type}, \code{retrieved_norms} & \code{contract_valid}, \code{validation_errors} & \code{VALIDATE_CONTRACT_PROMPT} & LLM \\ \hline
+    \code{handle_validation_error} & цикл регенерации & \code{iteration_count} & \code{iteration_count} & --- & --- \\ \hline
+    \code{generate_recommendations} & рекомендации & \code{deal_description}, \code{deal_type}, \code{general_norms}, \code{retrieved_norms} & \code{recommendations}, \code{final_recommendations_exchange} & \code{GENERATE_RECOMMENDATIONS_PROMPT} & LLM \\ \hline
+    \code{enrich_recommendations} & обогащение & \code{recommendations}, \code{deal_type} & \code{recommendations} (перезаписывается) & \code{DETECT_VAGUE_REFERENCES_PROMPT}, \code{RAG_SUBAGENT_PROMPT}, \code{INTEGRATE_ENRICHMENTS_PROMPT} & LLM, Qdrant \\ \hline
+    \code{save_result} & сохранение & \code{contract_html}, \code{recommendations}, \code{case_id} & \code{result_docx_path}, \code{result_saved} & --- & MinIO, PostgreSQL, WebSocket \\ \hline
+    \code{followup_response} & доп. вопросы & \code{messages}, \code{retrieved_norms}, \code{contract_md}, \code{recommendations} & \code{messages}, поля \code{subagent_*}, \code{subagent_active} & \code{FOLLOWUP_TRIAGE_PROMPT}, \code{FOLLOWUP_RESPONSE_PROMPT} & LLM \\ \hline
+    \code{followup_subagent_search} & субагент доп. вопросов & \code{subagent_brief}, \code{subagent_query}, \code{subagent_query_history} & поля \code{subagent_*}, \code{messages} при found & \code{FOLLOWUP_SUBAGENT_PROMPT} & LLM, Qdrant \\ \hline
+\end{longtable}
+\normalsize
+\landscapestop
+
+Условные функции маршрутизации между узлами реализованы в модулях \texttt{graph.py} и \texttt{routing.py}: \code{_route_after_user_message}, \code{_route_after_classification}, \code{_route_after_general_norms}, \code{_route_after_written_form}, \code{_route_after_data_sufficiency}, \code{_route_after_optional_contract_answer}, \code{_route_after_validation}, \code{_route_after_followup}, \code{_route_after_followup_subagent}. Каждая возвращает имя следующего узла строго из закрытого множества, перечисленного в декларации соответствующего вызова \texttt{add\_conditional\_edges} в сборке графа.
