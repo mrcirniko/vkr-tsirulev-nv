@@ -1411,7 +1411,7 @@ function renderDealTypesSection() {
       <header class="admin-section__head">
         <div>
           <h1>Типы договоров</h1>
-          <p class="muted">${count} тип(ов) в каталоге. Файл хранится в S3 (admin-npa/config/supported_deal_types.json) и применяется графом в течение нескольких секунд после сохранения.</p>
+          <p class="muted">В каталоге ${count} тип(ов) договоров. Изменения применяются автоматически в течение нескольких секунд после сохранения.</p>
         </div>
         <button type="button" class="icon-button" id="deal-types-refresh" title="Загрузить актуальный JSON">${icon("Refresh")}</button>
       </header>
