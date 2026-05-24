@@ -39,17 +39,21 @@
 % Базовый codestyle из 20-listing.sty имеет опечатку extendedchars=\true,
 % из-за которой кириллица и спецсимволы рендерятся некорректно. Здесь
 % задан собственный стиль без подсветки ключевых слов/строк/комментариев
-% и с корректным extendedchars=true.
+% и с корректным extendedchars=true. columns=fixed обязателен: при
+% fullflexible пакет listings в xelatex переставляет скобки и слэши
+% вокруг кириллических слов (известная несовместимость метрик шрифта
+% с двухбайтовой UTF-8). breakatwhitespace=true запрещает разрыв строк
+% внутри русских слов.
 \lstdefinestyle{promptstyle}{
     frame=single,
     basicstyle=\ttfamily\footnotesize,
     numbers=none,
-    breakatwhitespace=false,
+    breakatwhitespace=true,
     showstringspaces=false,
     breaklines=true,
     keepspaces=true,
     extendedchars=true,
-    columns=fullflexible,
+    columns=fixed,
     upquote=true,
     backgroundcolor=\color{backcolour},
 }
