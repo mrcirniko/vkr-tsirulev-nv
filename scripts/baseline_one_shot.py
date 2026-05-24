@@ -1,23 +1,6 @@
-"""One-shot baseline contract generator for agent-vs-baseline comparison.
-
-Calls the configured LLM once with a combined prompt that asks for:
-  1) deal type from the supported catalog,
-  2) full HTML contract body,
-  3) Markdown recommendations.
-
-Saves the contract as DOCX and recommendations as Markdown. File names:
-  baseline_<model>_recomendations.md
-  baseline_<model>_contract.docx
-
-Used to measure the value of the multi-step agent pipeline (classification +
-RAG + validation loop + structured generation) against a single LLM call
-with the same model.
-
-Usage:
-    python scripts/baseline_one_shot.py "Хочу сдать квартиру на год за 50000 в месяц"
-    python scripts/baseline_one_shot.py --description-file desc.txt --output-dir data/baseline
-    python scripts/baseline_one_shot.py "..." --model qwen2.5:14b
-"""
+"""Однократный baseline-генератор: один вызов LLM с объединённым промптом
+на определение типа сделки, HTML-проект договора и Markdown-рекомендации.
+Используется для сравнения с многошаговым пайплайном агента."""
 
 from __future__ import annotations
 
@@ -34,7 +17,6 @@ APP_DIR = BASE_DIR if (BASE_DIR / "config.py").exists() else BASE_DIR / "app"
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-# Disable LangSmith tracing — single-call baseline experiment, irrelevant to quota.
 os.environ["LANGSMITH_TRACING"] = "false"
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
 
@@ -192,11 +174,6 @@ def _sanitize_model_name(model: str) -> str:
 
 
 def _parse_response(text: str) -> tuple[str, str, str]:
-    """Split LLM output into (deal_type, contract_html, recommendations_md).
-
-    Markers must appear in order. We tolerate extra whitespace around the
-    markers and leading/trailing blank lines inside each section.
-    """
     deal_idx = text.find(SECTION_DEAL)
     html_idx = text.find(SECTION_HTML)
     md_idx = text.find(SECTION_MD)
@@ -228,13 +205,6 @@ def _make_llm(model: str | None) -> ChatOllama:
 
 
 def _generate_docx_to(target: Path, contract_html: str, deal_type: str, model_tag: str) -> Path | None:
-    """Call `generate_docx`, then move the resulting file to `target`.
-
-    generate_docx hard-codes the output to data/contracts/<case_id>/v<n>.docx;
-    we feed it a temp case_id and rename. The temp case directory is
-    removed afterwards to avoid littering data/contracts/ with one-off
-    baseline artifacts.
-    """
     tmp_case_id = f"_baseline_{model_tag}"
     try:
         tmp_path_str = generate_docx(contract_html, case_id=tmp_case_id, version=1, deal_type=deal_type)
@@ -294,14 +264,13 @@ def run_baseline(description: str, output_dir: Path, model: str | None = None) -
 
 
 def _default_output_dir() -> Path:
-    # Resolves to a bind-mounted location both on host and inside the container.
     return BASE_DIR / "data" / "baseline_outputs"
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-    parser = argparse.ArgumentParser(description="One-shot baseline contract generator")
+    parser = argparse.ArgumentParser(description="Однократный baseline-генератор договора")
     parser.add_argument(
         "description",
         nargs="?",

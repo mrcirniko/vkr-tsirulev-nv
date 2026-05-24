@@ -1,16 +1,5 @@
-"""Bi-encoder-only sanity check against the RAG indices.
-
-Bypasses everything except the embedder + Qdrant similarity search — no
-reranker, no reference-expansion, no LLM filter. Useful for answering
-"is the embedder/index even returning the right ballpark?" without the
-agent's noise.
-
-Usage:
-    python scripts/rag_probe.py "существенные условия договора"
-    python scripts/rag_probe.py "..." --top-k 10
-    python scripts/rag_probe.py "..." --collection primal
-    python scripts/rag_probe.py "..." --collection all --show-text
-"""
+"""Диагностический зонд RAG-индексов: один вызов бикодера и прямой поиск в
+Qdrant, без реранкера, расширения по ссылкам и LLM-фильтра."""
 
 from __future__ import annotations
 
@@ -40,7 +29,7 @@ def _collection_names() -> dict[str, str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Pure bi-encoder probe against Qdrant")
+    parser = argparse.ArgumentParser(description="Зонд бикодера по Qdrant")
     parser.add_argument("query", help="Поисковый запрос (заключи в кавычки)")
     parser.add_argument("--top-k", type=int, default=5, help="Сколько чанков на коллекцию (default: 5)")
     parser.add_argument(
@@ -75,7 +64,7 @@ def main() -> None:
             points = _search_collection(
                 collection_name=collection,
                 query=args.query,
-                source_filter=source_filter,
+                source_filter=args.source_filter,
                 top_k=args.top_k,
             )
         except Exception as exc:
