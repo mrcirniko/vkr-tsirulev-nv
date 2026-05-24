@@ -35,7 +35,7 @@ sudo docker compose exec ollama ollama pull gemma4:31b-cloud # или другу
 
 Скрипт `scripts/eval_retrieval.py` прогоняет каждое описание из `data/gold_sources.json` через граф агента до узла `retrieve_norms` (с прерыванием) и сравнивает возвращённые чанки с эталонными ссылками. Уточняющие вопросы агента симулируются отдельным LLM-вызовом, поэтому ручного участия не требуется.
 
-Запускается **внутри контейнера** `app` или `langgraph_dev` (нужны доступ к Qdrant, Ollama и загруженным моделям):
+Запускается внутри контейнера `app` или `langgraph_dev` (нужны доступ к Qdrant, Ollama и загруженным моделям):
 
 ```bash
 sudo docker compose exec app python scripts/eval_retrieval.py
@@ -53,18 +53,4 @@ sudo docker compose exec app python scripts/eval_retrieval.py \
 
 Результат — CSV в `data/eval_outputs/`. Имя файла кодирует конфигурацию (эмбеддер, реранкер, фильтр) и unix-timestamp, чтобы разные прогоны не перезаписывали друг друга. По каждой строке выводятся `precision@k`, `recall@k`, `hit@k`, латентность узла поиска и сравнение «эталон vs выдача» (`required_sources` / `actual_sources`).
 
-Чтобы сравнить две конфигурации поиска (например, с реранкером и без него), меняются переменные в `.env` (`RERANKER_ENABLED`, `RETRIEVAL_FILTER_ENABLED`, `EMBED_MODEL`), пересобирается бекенд и запускается скрипт повторно — CSV сохранится под другим именем.
-
-Сводный анализ полученных CSV — в `notebooks/eval_outputs_analysis_notebook.ipynb`.
-
-## Структура репозитория
-
-| Каталог | Что внутри |
-|---|---|
-| `app/` | FastAPI-бекенд, граф LangGraph, RAG, биллинг, админка, аутентификация |
-| `frontend/` | Статика SPA на vanilla JS, nginx-конфиг, два экрана: пользовательский и админский |
-| `scripts/` | CLI-инструменты для оценки качества и зондирования RAG |
-| `data/` | `gold_sources.json` — эталонный датасет; `eval_outputs/` — результаты прогонов |
-| `notebooks/` | Jupyter-разбор результатов оценки |
-| `diploma-text/` | LaTeX-источники текста ВКР |
-| `results/` | Артефакты экспертной апробации (CSV оценок, графики, скриншоты опроса) |
+Чтобы сравнить две конфигурации поиска (например, с реранкером и без него), меняются переменные в `.env` (`RERANKER_ENABLED`, `RETRIEVAL_FILTER_ENABLED`, `EMBED_MODEL`), пересобирается бекенд и запускается скрипт повторно.
