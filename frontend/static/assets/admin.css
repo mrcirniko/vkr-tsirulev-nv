@@ -856,6 +856,40 @@
   border-color: var(--line-strong);
 }
 
+.form-label {
+  display: block;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.form-input {
+  width: 100%;
+  background: var(--panel-soft);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.form-input:focus {
+  border-color: var(--line-strong);
+}
+
+.form-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.form-input::placeholder {
+  color: var(--faint);
+}
+
 .admin-checkbox {
   display: flex;
   align-items: flex-start;

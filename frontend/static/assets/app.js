@@ -1084,7 +1084,13 @@ function renderVersions() {
 function bindEvents() {
   bindCaseButtons();
   document.getElementById("new-chat-button")?.addEventListener("click", newCase);
-  document.getElementById("search-button")?.addEventListener("click", () => setState({ searchOpen: !state.searchOpen }));
+  document.getElementById("search-button")?.addEventListener("click", () => {
+    if (!state.sidebarOpen) {
+      setState({ sidebarOpen: true, searchOpen: true });
+    } else {
+      setState({ searchOpen: !state.searchOpen });
+    }
+  });
   document.getElementById("sidebar-toggle")?.addEventListener("click", () => setState({ sidebarOpen: !state.sidebarOpen }));
   document.getElementById("theme-toggle")?.addEventListener("click", toggleTheme);
   const search = document.getElementById("chat-search");
@@ -1136,6 +1142,87 @@ function bindEvents() {
   // Settings-modal events are bound separately via _bindSettingsModalEvents
   // when the modal is mounted; they don't go through bindEvents() since the
   // modal lives outside #app.
+  bindResizeHandles();
+}
+
+const RESIZE_LIMITS = {
+  left:  { min: 240, max: 520, varName: "--sidebar-width",     storageKey: "pactumai.sidebarWidth" },
+  right: { min: 260, max: 640, varName: "--right-panel-width", storageKey: "pactumai.rightPanelWidth" },
+};
+
+function restorePanelWidths() {
+  for (const cfg of Object.values(RESIZE_LIMITS)) {
+    const saved = parseInt(localStorage.getItem(cfg.storageKey), 10);
+    if (Number.isFinite(saved) && saved >= cfg.min && saved <= cfg.max) {
+      document.documentElement.style.setProperty(cfg.varName, saved + "px");
+    }
+  }
+}
+
+const COLLAPSE_THRESHOLD = 120; // Драг левой ручки левее min на столько — сворачиваем сайдбар.
+const EXPAND_THRESHOLD = 10;    // Драг правой границы свёрнутого сайдбара на столько вправо — раскрываем.
+const COLLAPSED_VISUAL_WIDTH = 72;
+
+function bindResizeHandles() {
+  document.querySelectorAll(".resize-handle").forEach((handle) => {
+    const side = handle.dataset.resize;
+    const cfg = RESIZE_LIMITS[side];
+    if (!cfg) return;
+    handle.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      const startX = event.clientX;
+      const startedClosed = side === "left" && !state.sidebarOpen;
+      const storedWidth = parseInt(
+        getComputedStyle(document.documentElement).getPropertyValue(cfg.varName).trim(),
+        10
+      ) || (side === "left" ? 310 : 360);
+      const startWidth = startedClosed ? COLLAPSED_VISUAL_WIDTH : storedWidth;
+      let opened = !startedClosed;
+
+      document.body.classList.add("resizing");
+      handle.classList.add("resize-handle--active");
+
+      const cleanup = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        document.body.classList.remove("resizing");
+        handle.classList.remove("resize-handle--active");
+      };
+
+      const onMove = (ev) => {
+        const delta = side === "left" ? ev.clientX - startX : startX - ev.clientX;
+        const raw = startWidth + delta;
+        if (side === "left") {
+          if (!opened) {
+            if (delta >= EXPAND_THRESHOLD) {
+              opened = true;
+              const next = Math.max(cfg.min, Math.min(cfg.max, raw));
+              document.documentElement.style.setProperty(cfg.varName, next + "px");
+              setState({ sidebarOpen: true });
+            }
+            return;
+          }
+          if (raw < cfg.min - COLLAPSE_THRESHOLD) {
+            opened = false;
+            setState({ sidebarOpen: false });
+            return;
+          }
+        }
+        const next = Math.max(cfg.min, Math.min(cfg.max, raw));
+        document.documentElement.style.setProperty(cfg.varName, next + "px");
+      };
+      const onUp = () => {
+        cleanup();
+        const final = parseInt(
+          getComputedStyle(document.documentElement).getPropertyValue(cfg.varName).trim(),
+          10
+        );
+        if (Number.isFinite(final)) localStorage.setItem(cfg.storageKey, String(final));
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  });
 }
 
 function bindCaseButtons() {
@@ -1201,7 +1288,7 @@ function renderLoginScreen() {
           <div class="auth-preview">
             <div class="auth-preview__shine"></div>
             <div class="auth-preview__msg auth-preview__msg--user">
-              <div class="auth-preview__bubble auth-preview__bubble--user">Хочу подарить другу свою старую книгу. Я физлицо, он физлицо. Передам прямо сейчас из рук в руки, безвозмездно.</div>
+              <div class="auth-preview__bubble auth-preview__bubble--user">Хочу подарить другу свою старую книгу. Передам прямо сейчас из рук в руки, безвозмездно.</div>
             </div>
             <div class="auth-preview__msg auth-preview__msg--ai">
               <div class="auth-preview__avatar">⚖️</div>
@@ -1257,6 +1344,7 @@ function render() {
   const detail = state.detail || emptyDetail;
   const hasCase = Boolean(state.currentCaseId);
   const loading = isLoadingForCurrentCase();
+  const prevHistoryScroll = document.getElementById("chat-history")?.scrollTop ?? 0;
   app.innerHTML = `
     <div class="shell ${state.sidebarOpen ? "" : "shell--sidebar-closed"}">
       <aside class="sidebar">
@@ -1299,12 +1387,13 @@ function render() {
         ` : ""}
       </aside>
 
+      <div class="resize-handle resize-handle--left" data-resize="left" aria-hidden="true"></div>
+
       <main class="chat-column">
         <header class="chat-header">
           <div>
             <p class="eyebrow">${hasCase ? statusLabel(detail.status) : "Новый чат"}</p>
             <h1>${escapeHtml(detail.title || "Новый договор")}</h1>
-            <p>${escapeHtml(detail.deal_description || "Опишите сделку, стороны, предмет, цену и срок.")}</p>
           </div>
           <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Переключить тему">
             ${state.theme === "dark" ? icon("Moon") : icon("Sun")}
@@ -1328,6 +1417,8 @@ function render() {
         <p class="composer__disclaimer">PactumAI может допускать ошибки. Рекомендуем проконсультироваться с профессиональным юристом.</p>
       </main>
 
+      <div class="resize-handle resize-handle--right" data-resize="right" aria-hidden="true"></div>
+
       <aside class="contracts-panel">
         <div class="contracts-panel__header">
           <div>
@@ -1344,6 +1435,8 @@ function render() {
     ${state.quotaError ? renderQuotaModal() : ""}
   `;
   bindEvents();
+  const historyEl = document.getElementById("chat-history");
+  if (historyEl && prevHistoryScroll > 0) historyEl.scrollTop = prevHistoryScroll;
   requestAnimationFrame(scrollChatToBottom);
 }
 
@@ -1598,6 +1691,7 @@ function renderReturnScreen() {
 
 async function bootstrap() {
   applyTheme();
+  restorePanelWidths();
   render();
   await checkAuth();
   if (!state.currentUser) {

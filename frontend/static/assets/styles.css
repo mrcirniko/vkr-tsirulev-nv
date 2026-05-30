@@ -22,6 +22,8 @@
   --scroll-thumb-hover: rgba(255, 255, 255, 0.32);
   --shadow: none;
   --chat-content-width: 860px;
+  --sidebar-width: 310px;
+  --right-panel-width: 360px;
   font-family: "Manrope", "IBM Plex Sans", "Segoe UI", sans-serif;
 }
 
@@ -90,15 +92,78 @@ a {
 .shell {
   height: 100vh;
   display: grid;
-  grid-template-columns: 310px minmax(0, 1fr) 360px;
+  grid-template-columns: var(--sidebar-width) 4px minmax(0, 1fr) 4px var(--right-panel-width);
   gap: 0;
   padding: 0;
   overflow: hidden;
   transition: grid-template-columns 180ms ease;
 }
 
+body.resizing .shell {
+  transition: none;
+}
+
 .shell--sidebar-closed {
-  grid-template-columns: 72px minmax(0, 1fr) 360px;
+  grid-template-columns: 72px 4px minmax(0, 1fr) 4px var(--right-panel-width);
+}
+
+.resize-handle {
+  cursor: col-resize;
+  background: transparent;
+  transition: background 120ms ease;
+  user-select: none;
+  touch-action: none;
+}
+
+.resize-handle:hover,
+.resize-handle--active {
+  background: var(--line-strong);
+}
+
+.shell--sidebar-closed .user-badge-wrap {
+  width: 40px;
+  height: 40px;
+  align-self: center;
+  margin-top: auto;
+}
+
+.shell--sidebar-closed .user-badge {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  gap: 0;
+  border-radius: 50%;
+  overflow: hidden;
+  justify-content: center;
+}
+
+.shell--sidebar-closed .user-badge__avatar {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.shell--sidebar-closed .user-badge__info {
+  display: none;
+}
+
+.shell--sidebar-closed .user-menu {
+  position: fixed;
+  bottom: 16px;
+  left: 80px;
+  right: auto;
+  width: 260px;
+  z-index: 200;
+}
+
+body.resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.resizing * {
+  cursor: col-resize !important;
 }
 
 .sidebar,
@@ -111,6 +176,12 @@ a {
   box-shadow: none;
   backdrop-filter: none;
 }
+
+.sidebar              { grid-column: 1; }
+.resize-handle--left  { grid-column: 2; }
+.chat-column          { grid-column: 3; }
+.resize-handle--right { grid-column: 4; }
+.contracts-panel      { grid-column: 5; }
 
 .sidebar {
   overflow: hidden;
@@ -155,8 +226,7 @@ a {
   font-size: 0.82rem;
 }
 
-.shell--sidebar-closed .brand__text,
-.shell--sidebar-closed .sidebar__actions,
+.shell--sidebar-closed .brand,
 .shell--sidebar-closed .chat-search,
 .shell--sidebar-closed .history-heading,
 .shell--sidebar-closed .chat-history {
@@ -165,6 +235,22 @@ a {
 
 .shell--sidebar-closed .sidebar__top {
   justify-content: center;
+}
+
+.shell--sidebar-closed .sidebar__actions {
+  justify-items: center;
+}
+
+.shell--sidebar-closed .side-action {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  gap: 0;
+  justify-content: center;
+}
+
+.shell--sidebar-closed .side-action span {
+  display: none;
 }
 
 .icon-button,
