@@ -221,6 +221,15 @@ class Settings:
     yookassa_shop_id: str = os.getenv("YOOKASSA_SHOP_ID", "").strip()
     yookassa_secret_key: str = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
     yookassa_test_mode: bool = os.getenv("YOOKASSA_TEST_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
+    # Dev-only: auto-apply purchases at checkout creation so no manual curl to the
+    # webhook is needed. Never enable in production — anyone hitting /checkout
+    # would get a paid subscription without actually paying.
+    yookassa_auto_confirm: bool = os.getenv("YOOKASSA_AUTO_CONFIRM", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     yookassa_return_url: str = os.getenv(
         "YOOKASSA_RETURN_URL",
         "http://localhost:3000/billing/return",
@@ -258,6 +267,10 @@ def _validate(s: Settings) -> Settings:
         # Ephemeral per-process secret for dev — invalidates sessions on restart.
         object.__setattr__(s, "session_secret", secrets.token_urlsafe(48))
         LOGGER.warning("config: SESSION_SECRET not set; generated ephemeral secret")
+    if s.yookassa_auto_confirm:
+        if is_prod:
+            raise RuntimeError("YOOKASSA_AUTO_CONFIRM must not be enabled in production")
+        LOGGER.warning("config: YOOKASSA_AUTO_CONFIRM=true — purchases auto-apply without webhook (dev only)")
     return s
 
 

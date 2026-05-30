@@ -81,7 +81,7 @@ def get_plans(_: User = Depends(require_user)) -> list[PlanDTO]:
 
 
 @router.post("/checkout", response_model=CheckoutResponse, status_code=201)
-def post_checkout(payload: CheckoutRequest, user: User = Depends(require_user)) -> CheckoutResponse:
+async def post_checkout(payload: CheckoutRequest, user: User = Depends(require_user)) -> CheckoutResponse:
     if not settings.billing_enabled:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Billing not configured")
 
@@ -142,4 +142,27 @@ def post_checkout(payload: CheckoutRequest, user: User = Depends(require_user)) 
         user.id,
         code,
     )
+
+    if settings.yookassa_auto_confirm:
+        # Dev shortcut: skip the YooKassa webhook entirely — apply the purchase
+        # immediately so the user comes back from the redirect to an already-
+        # active subscription.
+        try:
+            user_id_uuid, plan_code_str, already = service.mark_payment_status(created.id, PaymentStatus.SUCCEEDED)
+            if user_id_uuid is not None and plan_code_str is not None and not already:
+                sub = service.apply_purchase(user_id_uuid, plan_code_str, created.id)
+                from realtime import emit_to_user
+
+                await emit_to_user(
+                    str(user_id_uuid),
+                    {
+                        "type": "subscription_updated",
+                        "plan_code": str(plan_code_str),
+                        "expires_at": sub.expires_at.isoformat(),
+                    },
+                )
+                LOGGER.info("Auto-confirmed payment=%s user_id=%s plan=%s", created.id, user.id, code)
+        except Exception:
+            LOGGER.exception("Auto-confirm failed for payment=%s", created.id)
+
     return CheckoutResponse(payment_id=created.id, confirmation_url=created.confirmation_url)
